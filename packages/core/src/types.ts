@@ -201,8 +201,14 @@ export interface StepResult {
  * ticks or integer counts so determinism holds.
  */
 export interface MatchConfig {
-  /** Ticks before the piece falls one cell. */
+  /** Ticks before the piece falls one cell, at the start of the match. */
   gravityTicks: number;
+  /** Ticks between gravity ramp steps. `0` freezes gravity at `gravityTicks`. */
+  gravityRampEveryTicks: number;
+  /** Ticks shaved off the gravity interval at each ramp step. */
+  gravityRampStepTicks: number;
+  /** Floor for the gravity interval — gravity never gets faster than this. */
+  gravityMinTicks: number;
   /** Ticks the piece may rest on the stack before locking. */
   lockDelayTicks: number;
   /** How many times a move/rotate may reset the lock timer. */
@@ -223,6 +229,12 @@ export interface MatchConfig {
 
 export const DEFAULT_CONFIG: MatchConfig = {
   gravityTicks: 48,
+  // Every 30 s the pieces fall a little faster, bottoming out just under four
+  // minutes in. Without this a VS match between two competent players had no
+  // reason to ever end.
+  gravityRampEveryTicks: 30 * TICK_HZ,
+  gravityRampStepTicks: 6,
+  gravityMinTicks: 4,
   lockDelayTicks: 30,
   maxLockResets: 15,
   dasTicks: 10,

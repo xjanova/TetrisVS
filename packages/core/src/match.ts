@@ -134,6 +134,30 @@ function setLast(p: PlayerState, action: LastAction, kickIndex: number): void {
   p.lastKickIndex = kickIndex;
 }
 
+/**
+ * Gravity interval for a given tick.
+ *
+ * Pure and integer-only, so both sides of a match derive the same value from
+ * `frame` alone — no timer, no level counter to keep in sync, nothing extra in
+ * the snapshot.
+ */
+export function gravityAt(frame: number, config: MatchConfig = DEFAULT_CONFIG): number {
+  if (config.gravityRampEveryTicks <= 0 || config.gravityRampStepTicks <= 0) return config.gravityTicks;
+  const steps = Math.floor(Math.max(0, frame) / config.gravityRampEveryTicks);
+  const interval = config.gravityTicks - steps * config.gravityRampStepTicks;
+  return Math.max(config.gravityMinTicks, interval);
+}
+
+/** 1-based difficulty step, purely for display. */
+export function levelAt(frame: number, config: MatchConfig = DEFAULT_CONFIG): number {
+  if (config.gravityRampEveryTicks <= 0) return 1;
+  const steps = Math.floor(Math.max(0, frame) / config.gravityRampEveryTicks);
+  const maxSteps = config.gravityRampStepTicks > 0
+    ? Math.ceil((config.gravityTicks - config.gravityMinTicks) / config.gravityRampStepTicks)
+    : 0;
+  return Math.min(steps, maxSteps) + 1;
+}
+
 /** Reset the lock timer after a successful move/rotate, if resets remain. */
 function tryResetLock(p: PlayerState, config: MatchConfig): void {
   if (p.lockTicks > 0 && p.lockResets < config.maxLockResets) {
@@ -465,7 +489,7 @@ function stepPlayer(
     }
   } else {
     p.gravityTicks++;
-    if (p.gravityTicks >= config.gravityTicks) {
+    if (p.gravityTicks >= gravityAt(state.frame, config)) {
       p.gravityTicks = 0;
       tryMove(p, 0, 1);
     }

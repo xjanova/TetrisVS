@@ -47,12 +47,20 @@ export type {
   StepResult,
 } from './types.js';
 
-export { createMatch, step, stepMany, cloneState, detectTSpin, VISIBLE_TOP } from './match.js';
+export { createMatch, step, stepMany, cloneState, detectTSpin, gravityAt, levelAt, VISIBLE_TOP } from './match.js';
 export type { TSpinResult } from './match.js';
 
 export { nextPieces, pieceAt, bagAt, garbageHole, xorshift32, mixSeed } from './rng.js';
 
 export { serialize, deserialize, hash } from './serialize.js';
+
+export {
+  encodeSnapshotFrame,
+  encodeFullFrame,
+  decodeSnapshotFrame,
+  isFullFrame,
+  fullFrameSize,
+} from './delta.js';
 
 export {
   emptyBoard,

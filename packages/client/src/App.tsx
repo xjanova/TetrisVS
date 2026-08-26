@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CoreEvent, MatchState, PlayerId } from '@tetrisvs/core';
-import { createMatch, deserialize, step, TICK_HZ } from '@tetrisvs/core';
+import { createMatch, step, TICK_HZ } from '@tetrisvs/core';
 import { BoardCanvas } from './components/BoardCanvas';
 import { PlayerHud } from './components/PlayerHud';
 import { ChipAudio } from './game/audio';
 import { LocalInput } from './game/input';
-import { connectOnline, snapshotBytes, type OnlineSocket } from './game/online';
+import { connectOnline, SnapshotStream, type EndReason, type OnlineSocket } from './game/online';
 
 type Scene = 'menu' | 'room' | 'match' | 'results';
 type MatchMode = 'local' | 'online';
-type RoomStatus = 'idle' | 'connecting' | 'searching' | 'waiting' | 'matched' | 'connected' | 'disconnected';
+type RoomStatus =
+  | 'idle' | 'connecting' | 'searching' | 'waiting' | 'matched'
+  | 'connected' | 'reconnecting' | 'disconnected';
 
 interface EventBatch {
   id: number;
@@ -25,10 +27,20 @@ const CONTROL_ROWS = [
   ['HOLD', 'C', '/'],
 ];
 
+const TICK_MS = 1000 / TICK_HZ;
+/** Longest frame the local loop will integrate — the rest is dropped, not owed. */
+const MAX_FRAME_MS = 100;
+/** Simulation steps one animation frame may run before we give the browser back control. */
+const MAX_STEPS_PER_FRAME = 8;
+/** Resend held state at least this often online, so a lost packet self-heals. */
+const INPUT_HEARTBEAT_TICKS = 20;
+/** Delay between a match ending and the result card, so the last effects land. */
+const RESULT_DELAY_MS = 800;
+
 function makeSeed() {
   const data = new Uint32Array(1);
   crypto.getRandomValues(data);
-  return data[0] | 0;
+  return data[0]! | 0;
 }
 
 export function App() {
@@ -44,20 +56,50 @@ export function App() {
   const [onlineRole, setOnlineRole] = useState<PlayerId | null>(null);
   const [roomStatus, setRoomStatus] = useState<RoomStatus>('idle');
   const [onlineError, setOnlineError] = useState('');
+  const [endReason, setEndReason] = useState<EndReason>('topout');
+  const [busy, setBusy] = useState(false);
+  /** Synchronous mirror of `busy` — React state lands too late to stop a double-click. */
+  const busyRef = useRef(false);
+
   const stateRef = useRef<MatchState | null>(null);
   const pausedRef = useRef(false);
   const input = useMemo(() => new LocalInput(), []);
   const audio = useMemo(() => new ChipAudio(), []);
+  const stream = useMemo(() => new SnapshotStream(), []);
   const resultTimer = useRef(0);
   const socketRef = useRef<OnlineSocket | null>(null);
+  /**
+   * Bumped by every connect attempt. An async continuation that finds its
+   * generation stale simply returns — double-clicking QUICK MATCH used to leave
+   * a second live socket behind, still emitting into a room nobody was in.
+   */
+  const generation = useRef(0);
 
-  const disconnectOnline = useCallback(() => {
-    socketRef.current?.disconnect();
-    socketRef.current = null;
+  const clearResultTimer = useCallback(() => {
+    if (resultTimer.current) window.clearTimeout(resultTimer.current);
+    resultTimer.current = 0;
   }, []);
 
+  const scheduleResults = useCallback(() => {
+    if (resultTimer.current) return;
+    resultTimer.current = window.setTimeout(() => {
+      resultTimer.current = 0;
+      setScene('results');
+    }, RESULT_DELAY_MS);
+  }, []);
+
+  const disconnectOnline = useCallback(() => {
+    const socket = socketRef.current;
+    socketRef.current = null;
+    stream.reset();
+    if (!socket) return;
+    socket.removeAllListeners();
+    socket.disconnect();
+  }, [stream]);
+
   const returnToMenu = useCallback(() => {
-    window.clearTimeout(resultTimer.current);
+    generation.current++;
+    clearResultTimer();
     audio.stopMusic();
     input.clear();
     disconnectOnline();
@@ -65,14 +107,19 @@ export function App() {
     setMatch(null);
     setScene('menu');
     setPaused(false);
+    busyRef.current = false;
+    setBusy(false);
     setRoomStatus('idle');
     setOnlineRole(null);
     setOnlineError('');
-  }, [audio, disconnectOnline, input]);
+  }, [audio, clearResultTimer, disconnectOnline, input]);
 
   const startLocalMatch = useCallback(async () => {
-    window.clearTimeout(resultTimer.current);
-    resultTimer.current = 0;
+    generation.current++;
+    clearResultTimer();
+    disconnectOnline();
+    // Audio is a nice-to-have: a blocked or missing AudioContext must not stop
+    // the match from starting.
     await audio.unlock();
     audio.startMusic();
     const initial = createMatch(makeSeed());
@@ -81,29 +128,33 @@ export function App() {
     setBatch({ id: 0, events: [] });
     setCountdown(3);
     setPaused(false);
+    setEndReason('topout');
+    setRoomStatus('idle');
+    setOnlineError('');
     setMode('local');
     setScene('match');
+  }, [audio, clearResultTimer, disconnectOnline]);
+
+  const applyEvents = useCallback((events: CoreEvent[]) => {
+    if (!events.length) return;
+    audio.events(events);
+    setBatch((previous) => ({ id: previous.id + 1, events }));
+    for (let i = events.length - 1; i >= 0; i--) {
+      const event = events[i]!;
+      if (event.t === 'countdown') {
+        setCountdown(event.value > 0 ? event.value : null);
+        break;
+      }
+    }
   }, [audio]);
 
-  const consumeOnlineUpdate = useCallback((state: MatchState, events: CoreEvent[]) => {
-    stateRef.current = state;
-    setMatch(state);
-    if (events.length) {
-      audio.events(events);
-      setBatch((previousBatch) => ({ id: previousBatch.id + 1, events }));
-      const cue = [...events].reverse().find((event) => event.t === 'countdown');
-      if (cue?.t === 'countdown') setCountdown(cue.value > 0 ? cue.value : null);
-    }
-    if (state.status === 'finished' && !resultTimer.current) {
-      resultTimer.current = window.setTimeout(() => setScene('results'), 800);
-    }
-  }, [audio]);
-
-  const prepareOnlineSocket = useCallback(async () => {
-    window.clearTimeout(resultTimer.current);
-    resultTimer.current = 0;
-    await audio.unlock();
+  const prepareOnlineSocket = useCallback(async (): Promise<{ socket: OnlineSocket; token: number } | null> => {
+    const token = ++generation.current;
+    clearResultTimer();
     disconnectOnline();
+    await audio.unlock();
+    if (generation.current !== token) return null;
+
     setMode('online');
     setOnlineError('');
     setRoomStatus('connecting');
@@ -111,73 +162,161 @@ export function App() {
     setMatch(null);
     setBatch({ id: 0, events: [] });
     setCountdown(3);
+    setEndReason('topout');
     stateRef.current = null;
+
     const socket = connectOnline();
     socketRef.current = socket;
+
+    const live = () => generation.current === token && socketRef.current === socket;
+
     socket.on('connect_error', (error) => {
+      if (!live()) return;
       setOnlineError(`Server connection failed: ${error.message}`);
       setRoomStatus('idle');
+      busyRef.current = false;
+      setBusy(false);
     });
-    socket.on('matchmaking:searching', () => setRoomStatus('searching'));
+    socket.io.on('reconnect_attempt', () => {
+      if (live()) setRoomStatus((current) => (current === 'connected' ? 'reconnecting' : current));
+    });
+    socket.on('disconnect', (reason) => {
+      if (!live()) return;
+      stream.reset();
+      // An intentional close is not a network problem worth alarming about.
+      if (reason === 'io client disconnect') return;
+      setRoomStatus((current) => (current === 'disconnected' ? current : 'reconnecting'));
+    });
+    socket.on('connect', () => {
+      if (live()) socket.emit('match:resync');
+    });
+    socket.on('matchmaking:searching', () => {
+      if (live()) setRoomStatus('searching');
+    });
     socket.on('matchmaking:matched', ({ roomCode: code, playerId }) => {
+      if (!live()) return;
       setRoomCode(code);
       setOnlineRole(playerId);
       setRoomStatus('matched');
     });
     socket.on('room:ready', (code) => {
+      if (!live()) return;
       setRoomCode(code);
       setRoomStatus('connected');
       setCountdown(3);
+      busyRef.current = false;
+      setBusy(false);
       audio.startMusic();
       setScene('match');
     });
-    socket.on('match:update', ({ events, snapshot }) => {
-      consumeOnlineUpdate(deserialize(snapshotBytes(snapshot)), events);
+    socket.on('match:update', (update) => {
+      if (!live()) return;
+      const state = stream.apply(update);
+      if (!state) {
+        // Undecodable frame: keep rendering the last good state and ask for a
+        // full snapshot rather than tearing the match down.
+        socket.emit('match:resync');
+        return;
+      }
+      stateRef.current = state;
+      setMatch(state);
+      applyEvents(update.events);
+      if (state.status === 'finished') scheduleResults();
     });
-    socket.on('peer:disconnected', () => setRoomStatus('disconnected'));
-    return socket;
-  }, [audio, consumeOnlineUpdate, disconnectOnline]);
+    socket.on('match:ended', (_winner, reason) => {
+      if (!live()) return;
+      setEndReason(reason);
+      // A forfeit keeps the "PLAYER LEFT" card up — it is the one that offers a
+      // requeue — instead of flashing a result the player did not earn.
+      if (reason === 'topout') scheduleResults();
+    });
+    socket.on('peer:disconnected', () => {
+      if (!live()) return;
+      clearResultTimer();
+      setRoomStatus('disconnected');
+    });
 
-  const createOnlineRoom = useCallback(async () => {
-    const socket = await prepareOnlineSocket();
-    socket.emit('room:create', ({ roomCode: code, playerId }) => {
+    return { socket, token };
+  }, [applyEvents, audio, clearResultTimer, disconnectOnline, scheduleResults, stream]);
+
+  /** Wrap an async flow so a rejection surfaces in the UI instead of vanishing. */
+  const run = useCallback((label: string, flow: () => Promise<void>) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    flow()
+      .catch((error: unknown) => {
+        console.error(`[tetrisvs] ${label} failed:`, error);
+        setOnlineError(error instanceof Error ? error.message : `${label} failed.`);
+        setRoomStatus('idle');
+        setScene('menu');
+      })
+      .finally(() => {
+        busyRef.current = false;
+        setBusy(false);
+      });
+  }, []);
+
+  const createOnlineRoom = useCallback(() => run('room:create', async () => {
+    const session = await prepareOnlineSocket();
+    if (!session) return;
+    session.socket.emit('room:create', ({ roomCode: code, playerId }) => {
+      if (generation.current !== session.token) return;
+      if (!code) {
+        setOnlineError('The server is at capacity. Try again in a moment.');
+        setRoomStatus('idle');
+        setScene('menu');
+        return;
+      }
       setRoomCode(code);
       setOnlineRole(playerId);
       setRoomStatus('waiting');
     });
-  }, [prepareOnlineSocket]);
+  }), [prepareOnlineSocket, run]);
 
-  const startQuickMatch = useCallback(async () => {
-    const socket = await prepareOnlineSocket();
-    socket.emit('matchmaking:join', 'v1-default', ({ searching }) => {
+  const startQuickMatch = useCallback(() => run('matchmaking:join', async () => {
+    const session = await prepareOnlineSocket();
+    if (!session) return;
+    session.socket.emit('matchmaking:join', 'v1-default', ({ searching }) => {
+      if (generation.current !== session.token) return;
       if (searching) setRoomStatus('searching');
     });
-  }, [prepareOnlineSocket]);
+  }), [prepareOnlineSocket, run]);
 
   const cancelQuickMatch = useCallback(() => {
     const socket = socketRef.current;
-    if (socket) socket.emit('matchmaking:cancel', () => returnToMenu());
+    if (socket?.connected) socket.emit('matchmaking:cancel', () => returnToMenu());
     else returnToMenu();
+    // Do not wait on the server to leave the screen — an ack that never arrives
+    // must not strand the player on a cancelled search.
+    window.setTimeout(() => setScene((current) => (current === 'room' ? 'menu' : current)), 1500);
   }, [returnToMenu]);
 
-  const joinOnlineRoom = useCallback(async () => {
+  const joinOnlineRoom = useCallback(() => {
     const code = joinCode.trim().toUpperCase();
-    if (code.length !== 6) {
+    if (!/^[0-9A-F]{6}$/.test(code)) {
       setOnlineError('Enter the 6-character room code.');
       return;
     }
-    const socket = await prepareOnlineSocket();
-    socket.emit('room:join', code, (result) => {
-      if (!result.ok || result.playerId === undefined) {
-        setOnlineError(result.reason ?? 'Unable to join room.');
-        setRoomStatus('idle');
-        return;
-      }
-      setRoomCode(code);
-      setOnlineRole(result.playerId);
-      setRoomStatus('waiting');
+    run('room:join', async () => {
+      const session = await prepareOnlineSocket();
+      if (!session) return;
+      session.socket.emit('room:join', code, (result) => {
+        if (generation.current !== session.token) return;
+        if (!result.ok || result.playerId === undefined) {
+          setOnlineError(result.reason ?? 'Unable to join room.');
+          setRoomStatus('idle');
+          setScene('menu');
+          return;
+        }
+        setRoomCode(code);
+        setOnlineRole(result.playerId);
+        setRoomStatus('waiting');
+      });
     });
-  }, [joinCode, prepareOnlineSocket]);
+  }, [joinCode, prepareOnlineSocket, run]);
+
+  // ---------------------------------------------------------------- lifecycle
 
   useEffect(() => {
     if (scene !== 'match') return;
@@ -193,7 +332,13 @@ export function App() {
     audio.setMuted(muted);
   }, [audio, muted]);
 
-  useEffect(() => () => disconnectOnline(), [disconnectOnline]);
+  /** Tear everything down on unmount — timers, sockets, and the AudioContext. */
+  useEffect(() => () => {
+    clearResultTimer();
+    disconnectOnline();
+    input.detach();
+    audio.dispose();
+  }, [audio, clearResultTimer, disconnectOnline, input]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -206,60 +351,113 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [input, mode, scene]);
 
+  /**
+   * Leaving the tab during a local match pauses it. Online is authoritative and
+   * keeps running, so there we only drop held keys (the input layer does that)
+   * rather than pretending we can stop the clock.
+   */
+  useEffect(() => {
+    if (scene !== 'match' || mode !== 'local') return;
+    const suspend = () => {
+      if (document.visibilityState === 'hidden') {
+        input.clear();
+        setPaused(true);
+      }
+    };
+    const onBlur = () => {
+      input.clear();
+      setPaused(true);
+    };
+    document.addEventListener('visibilitychange', suspend);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      document.removeEventListener('visibilitychange', suspend);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, [input, mode, scene]);
+
+  // ---------------------------------------------------------------- game loop
+
   useEffect(() => {
     if (scene !== 'match') return;
     let raf = 0;
     let previous = performance.now();
     let accumulator = 0;
-    const tickMs = 1000 / TICK_HZ;
+    let sinceSend = INPUT_HEARTBEAT_TICKS;
+    let lastSignature = '';
 
     const loop = (now: number) => {
-      const elapsed = Math.min(100, now - previous);
+      raf = requestAnimationFrame(loop);
+      const elapsed = Math.min(MAX_FRAME_MS, Math.max(0, now - previous));
       previous = now;
+
       if (mode === 'online') {
+        // Send at the simulation rate rather than the display rate: a 144 Hz
+        // monitor used to push 144 messages a second per player at the server.
+        accumulator = Math.min(accumulator + elapsed, TICK_MS * 4);
+        if (accumulator < TICK_MS) return;
+        accumulator -= TICK_MS;
+
         const state = stateRef.current;
         const socket = socketRef.current;
-        if (state && socket?.connected && state.status !== 'finished') {
-          const consumed = input.consume(state.frame);
-          socket.emit('match:input', {
-            frame: state.frame,
-            pressed: [...new Set([...consumed[0].pressed, ...consumed[1].pressed])],
-            held: [...new Set([...consumed[0].held, ...consumed[1].held])],
-          });
+        if (!state || !socket?.connected || state.status === 'finished') return;
+
+        const payload = input.consumeMerged(state.frame);
+        const signature = LocalInput.signature(payload);
+        sinceSend++;
+        if (payload.pressed.length || signature !== lastSignature || sinceSend >= INPUT_HEARTBEAT_TICKS) {
+          socket.emit('match:input', payload);
+          lastSignature = signature;
+          sinceSend = 0;
         }
-        raf = requestAnimationFrame(loop);
         return;
       }
-      if (!pausedRef.current) accumulator += elapsed;
+
+      if (pausedRef.current) {
+        // Drop the backlog instead of banking it — resuming must not fast-forward.
+        accumulator = 0;
+        return;
+      }
+
+      accumulator += elapsed;
       let iterations = 0;
       const collected: CoreEvent[] = [];
 
-      while (accumulator >= tickMs && iterations < 8 && stateRef.current) {
+      while (accumulator >= TICK_MS && iterations < MAX_STEPS_PER_FRAME && stateRef.current) {
         const result = step(stateRef.current, input.consume(stateRef.current.frame));
         stateRef.current = result.state;
-        collected.push(...result.events);
-        accumulator -= tickMs;
+        if (result.events.length) collected.push(...result.events);
+        accumulator -= TICK_MS;
         iterations++;
       }
+      // Anything still owed after the cap is time we can never catch up on.
+      if (accumulator > TICK_MS) accumulator = 0;
 
       if (iterations && stateRef.current) setMatch(stateRef.current);
-      if (collected.length) {
-        audio.events(collected);
-        setBatch((previousBatch) => ({ id: previousBatch.id + 1, events: collected }));
-        const cue = [...collected].reverse().find((event) => event.t === 'countdown');
-        if (cue?.t === 'countdown') setCountdown(cue.value > 0 ? cue.value : null);
-      }
-
-      if (stateRef.current?.status === 'finished' && !resultTimer.current) {
-        resultTimer.current = window.setTimeout(() => setScene('results'), 800);
-      }
-      raf = requestAnimationFrame(loop);
+      applyEvents(collected);
+      if (stateRef.current?.status === 'finished') scheduleResults();
     };
+
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [audio, input, mode, scene]);
+  }, [applyEvents, input, mode, scene, scheduleResults]);
 
-  const eventsFor = (player: PlayerId) => batch.events.filter((event) => !('p' in event) || event.p === player);
+  // ---------------------------------------------------------------- render
+
+  const [eventsP1, eventsP2] = useMemo(() => {
+    const one: CoreEvent[] = [];
+    const two: CoreEvent[] = [];
+    for (const event of batch.events) {
+      if (!('p' in event)) {
+        one.push(event);
+        two.push(event);
+      } else if (event.p === 0) one.push(event);
+      else two.push(event);
+    }
+    return [one, two] as const;
+  }, [batch]);
+
+  const online = mode === 'online';
 
   return (
     <main className={`app scene-${scene}`} data-match-status={match?.status ?? 'none'} data-frame={match?.frame ?? 0}>
@@ -278,10 +476,10 @@ export function App() {
           <h1 aria-label="Tetris VS"><span>TETRIS</span><em>VS</em></h1>
           <p className="tagline">Stack fast. Send garbage. Own the grid.</p>
           <div className="mode-actions">
-            <button className="primary-button" onClick={startQuickMatch}><span>QUICK MATCH</span><i>VS</i></button>
-            <button className="online-button local-button" onClick={startLocalMatch}>LOCAL 2P · SAME KEYBOARD</button>
+            <button className="primary-button" disabled={busy} onClick={startQuickMatch}><span>QUICK MATCH</span><i>VS</i></button>
+            <button className="online-button local-button" disabled={busy} onClick={() => run('local', startLocalMatch)}>LOCAL 2P · SAME KEYBOARD</button>
             <div className="private-label">PRIVATE ROOM</div>
-            <button className="online-button" onClick={createOnlineRoom}>CREATE WITH CODE</button>
+            <button className="online-button" disabled={busy} onClick={createOnlineRoom}>CREATE WITH CODE</button>
             <div className="join-row">
               <input
                 aria-label="Room code"
@@ -289,9 +487,9 @@ export function App() {
                 maxLength={6}
                 placeholder="ROOM CODE"
                 onChange={(event) => setJoinCode(event.target.value.toUpperCase().replace(/[^A-F0-9]/g, ''))}
-                onKeyDown={(event) => { if (event.key === 'Enter') void joinOnlineRoom(); }}
+                onKeyDown={(event) => { if (event.key === 'Enter') joinOnlineRoom(); }}
               />
-              <button onClick={joinOnlineRoom}>JOIN</button>
+              <button disabled={busy} onClick={joinOnlineRoom}>JOIN</button>
             </div>
             {onlineError && <div className="online-error">{onlineError}</div>}
           </div>
@@ -315,6 +513,7 @@ export function App() {
             {roomStatus === 'waiting' && onlineRole === 0 && <p>Share this code with Player 2. The match starts automatically when they join.</p>}
             {roomStatus === 'waiting' && onlineRole === 1 && <p>Joined. Waiting for the authoritative match stream…</p>}
             {roomStatus === 'connecting' && <p>Contacting the TetrisVS server…</p>}
+            {roomStatus === 'reconnecting' && <p>Connection dropped. Retrying…</p>}
             {onlineError && <div className="online-error">{onlineError}</div>}
             <div className="connection-light"><i className={roomStatus} />{roomStatus.toUpperCase()}</div>
             <button className="text-button" onClick={roomStatus === 'searching' ? cancelQuickMatch : returnToMenu}>{roomStatus === 'searching' ? 'CANCEL SEARCH' : 'CANCEL'}</button>
@@ -325,22 +524,27 @@ export function App() {
       {match && (scene === 'match' || scene === 'results') && (
         <section className="battle-screen">
           <div className="player-zone player-zone--one">
-            <div className="player-title"><small>PLAYER</small><strong>01</strong><span>{mode === 'online' && onlineRole === 0 ? 'YOU · WASD' : 'WASD'}</span></div>
+            <div className="player-title"><small>PLAYER</small><strong>01</strong><span>{online && onlineRole === 0 ? 'YOU · WASD' : 'WASD'}</span></div>
             <PlayerHud state={match} playerId={0} />
-            <div className="board-shell"><BoardCanvas player={match.players[0]} events={eventsFor(0)} eventId={batch.id} /></div>
+            <div className="board-shell"><BoardCanvas player={match.players[0]} events={eventsP1} eventId={batch.id} /></div>
           </div>
           <div className="versus-column">
             <div className="vs-mark">VS</div>
             <div className="frame-counter">FRAME {String(match.frame).padStart(6, '0')}</div>
-            {mode === 'local' ? <button className="pause-button" onClick={() => setPaused((value) => !value)}>{paused ? 'RESUME' : 'PAUSE'}</button> : <div className="online-ping">ONLINE<br />{roomCode}</div>}
+            {online
+              ? <div className="online-ping">ONLINE<br />{roomCode}</div>
+              : <button className="pause-button" onClick={() => setPaused((value) => !value)}>{paused ? 'RESUME' : 'PAUSE'}</button>}
           </div>
           <div className="player-zone player-zone--two">
-            <div className="player-title"><small>PLAYER</small><strong>02</strong><span>{mode === 'online' && onlineRole === 1 ? 'YOU · WASD' : 'ARROWS'}</span></div>
-            <div className="board-shell"><BoardCanvas player={match.players[1]} events={eventsFor(1)} eventId={batch.id} /></div>
+            <div className="player-title"><small>PLAYER</small><strong>02</strong><span>{online && onlineRole === 1 ? 'YOU · WASD' : 'ARROWS'}</span></div>
+            <div className="board-shell"><BoardCanvas player={match.players[1]} events={eventsP2} eventId={batch.id} /></div>
             <PlayerHud state={match} playerId={1} />
           </div>
 
           {countdown !== null && match.status === 'countdown' && <div className="countdown" key={countdown}>{countdown}</div>}
+          {online && roomStatus === 'reconnecting' && scene === 'match' && (
+            <div className="net-banner">RECONNECTING…</div>
+          )}
           {paused && scene === 'match' && (
             <div className="modal-backdrop">
               <div className="pause-card"><div className="eyebrow">MATCH SUSPENDED</div><h2>PAUSED</h2><button className="primary-button" onClick={() => setPaused(false)}>RESUME</button><button className="text-button" onClick={returnToMenu}>QUIT TO MENU</button></div>
@@ -348,20 +552,28 @@ export function App() {
           )}
           {roomStatus === 'disconnected' && scene === 'match' && (
             <div className="modal-backdrop">
-              <div className="pause-card"><div className="eyebrow">CONNECTION LOST</div><h2>PLAYER LEFT</h2><p className="disconnect-copy">The opponent disconnected from room {roomCode}.</p><button className="primary-button" onClick={startQuickMatch}>QUICK MATCH AGAIN</button><button className="text-button" onClick={returnToMenu}>BACK TO MENU</button></div>
+              <div className="pause-card">
+                <div className="eyebrow">CONNECTION LOST</div>
+                <h2>PLAYER LEFT</h2>
+                <p className="disconnect-copy">The opponent disconnected from room {roomCode}. The match is yours by forfeit.</p>
+                <button className="primary-button" disabled={busy} onClick={startQuickMatch}>QUICK MATCH AGAIN</button>
+                <button className="text-button" onClick={returnToMenu}>BACK TO MENU</button>
+              </div>
             </div>
           )}
           {scene === 'results' && (
             <div className="modal-backdrop result-backdrop">
               <div className="result-card">
-                <div className="eyebrow">BATTLE COMPLETE</div>
+                <div className="eyebrow">{endReason === 'forfeit' ? 'OPPONENT LEFT' : 'BATTLE COMPLETE'}</div>
                 <h2>{match.winner === null ? 'DRAW GAME' : `PLAYER ${match.winner + 1} WINS`}</h2>
                 <div className="result-score">
                   <span>P1 <b>{match.players[0].attackSent}</b> ATK</span>
                   <i>—</i>
                   <span>P2 <b>{match.players[1].attackSent}</b> ATK</span>
                 </div>
-                {mode === 'local' && <button className="primary-button" onClick={startLocalMatch}>REMATCH</button>}
+                {online
+                  ? <button className="primary-button" disabled={busy} onClick={startQuickMatch}>QUICK MATCH AGAIN</button>
+                  : <button className="primary-button" disabled={busy} onClick={() => run('local', startLocalMatch)}>REMATCH</button>}
                 <button className="text-button" onClick={returnToMenu}>BACK TO MENU</button>
               </div>
             </div>

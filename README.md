@@ -44,10 +44,46 @@ audio, no Node built-ins. It runs unchanged in a browser and in Node.
 
 ```bash
 npm install
-npm test              # runs every workspace's tests
-npm run build         # compiles core, client, and server
-npm run dev -w @tetrisvs/client
+npm run verify        # build (core first) + every workspace's tests
+npm run dev           # client on http://127.0.0.1:5173
+npm run server        # authoritative server on :3001
 ```
+
+`npm run build` builds **core before client and server** on purpose: plain
+`--workspaces` visits them alphabetically, so the client used to compile against
+a stale `@tetrisvs/core` and fail on anything newly exported.
+
+### Verifying it end to end
+
+```bash
+npm run e2e:local     # local 2P in a real browser: tick rate, pause, blur, rematch
+npm run e2e:online    # two browsers, matchmaking, disconnect, requeue, result
+npm run smoke:abuse   # hostile payloads against a running server
+```
+
+The browser harnesses need `npm run dev` up; the abuse smoke needs
+`npm run server`. Set `CHROME_PATH` if Chrome is not at the Windows default.
+
+## Stability notes
+
+Things that are load-bearing and easy to undo by accident:
+
+- **The wire is delta-compressed.** `match:update.snapshot` is a *frame*, not a
+  snapshot: a full one at the start, then a byte-diff against the previous frame
+  that socket received. That is ~26 B/tick instead of ~1.2 kB, and it is why the
+  server keeps a per-socket baseline. A client that cannot decode a frame emits
+  `match:resync` and keeps rendering its last good state.
+- **Everything from a socket is hostile.** `packages/server/src/guards.ts` owns
+  the validation; every handler is wrapped so a throw costs one socket rather
+  than the process. `npm run smoke:abuse` is the regression test.
+- **The server runs a fixed timestep with an accumulator**, not
+  `setInterval(1000/60)` — that form is truncated to 16 ms and silently drops
+  every tick the event loop is late for.
+- **`gravityAt(frame)` is pure.** Difficulty ramps off the frame counter alone,
+  so nothing extra has to be synchronised or stored in the snapshot.
+- **The renderer caches its art.** Backdrop, grid, and per-colour block sprites
+  are baked into offscreen canvases; effect decay integrates real elapsed time
+  so a 144 Hz monitor does not play everything 2.4x too fast.
 
 Core API and rendering guide: [`packages/core/README.md`](packages/core/README.md).
 
