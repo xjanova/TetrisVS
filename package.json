@@ -8,14 +8,15 @@
   ],
   "scripts": {
     "test": "npm run test --workspaces --if-present",
-    "build": "npm run build -w @tetrisvs/core && npm run build -w @tetrisvs/client && npm run build -w @tetrisvs/server",
-    "typecheck": "npm run build -w @tetrisvs/core && npm run typecheck --workspaces --if-present",
+    "build": "npm run build -w @tetrisvs/core && npm run build -w @tetrisvs/store && npm run build -w @tetrisvs/client && npm run build -w @tetrisvs/server",
+    "typecheck": "npm run build -w @tetrisvs/core && npm run build -w @tetrisvs/store && npm run typecheck --workspaces --if-present",
     "dev": "npm run dev -w @tetrisvs/client",
     "server": "npm run start -w @tetrisvs/server",
     "verify": "npm run build && npm test",
     "e2e:local": "node scripts/browser-local-match-e2e.mjs",
     "e2e:online": "node scripts/browser-matchmaking-e2e.mjs",
-    "smoke:abuse": "node scripts/server-abuse-smoke.mjs"
+    "smoke:abuse": "node scripts/server-abuse-smoke.mjs",
+    "smoke:store": "node scripts/store-smoke.mjs"
   },
   "engines": {
     "node": ">=20"

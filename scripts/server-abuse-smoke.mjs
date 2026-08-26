@@ -81,6 +81,41 @@ async function main() {
   // 4. Input flood while not in a room.
   for (let i = 0; i < 3000; i++) attacker.emit('match:input', { frame: i, pressed: ['hardDrop'], held: [] });
 
+  // 3b. The HTTP API is a second attack surface — hit it just as hard.
+  const post = (path, body, headers = {}) => fetch(`${URL}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...headers },
+    body,
+  }).then((r) => r.status).catch(() => 'threw');
+
+  const apiProbes = [
+    ['oversized body',        () => post('/api/register', 'x'.repeat(2 * 1024 * 1024))],
+    ['malformed JSON',        () => post('/api/login', '{not json')],
+    ['JSON array not object', () => post('/api/login', '[1,2,3]')],
+    ['JSON null',             () => post('/api/login', 'null')],
+    ['empty body',            () => post('/api/login', '')],
+    ['deeply nested JSON',    () => post('/api/login', '['.repeat(2000) + ']'.repeat(2000))],
+    ['prototype pollution',   () => post('/api/register', JSON.stringify({ __proto__: { admin: true }, username: 'poller', password: 'a-good-password' }))],
+    ['sql in username',       () => post('/api/login', JSON.stringify({ username: "'; DROP TABLE players; --", password: 'x' }))],
+    ['giant username',        () => post('/api/login', JSON.stringify({ username: 'x'.repeat(3000), password: 'y' }))],
+    ['non-string fields',     () => post('/api/login', JSON.stringify({ username: { $ne: null }, password: [1, 2] }))],
+    ['path traversal',        () => fetch(`${URL}/api/players/..%2f..%2fetc%2fpasswd`).then((r) => r.status).catch(() => 'threw')],
+    ['absurd limit',          () => fetch(`${URL}/api/leaderboard?limit=99999999999`).then((r) => r.status).catch(() => 'threw')],
+    ['negative limit',        () => fetch(`${URL}/api/matches?limit=-5`).then((r) => r.status).catch(() => 'threw')],
+    ['huge bearer header',    () => fetch(`${URL}/api/me`, { headers: { authorization: `Bearer ${'x'.repeat(9000)}` } }).then((r) => r.status).catch(() => 'threw')],
+    ['replay id overflow',    () => fetch(`${URL}/api/matches/99999999999999999999/replay`).then((r) => r.status).catch(() => 'threw')],
+  ];
+
+  for (const [name, fire] of apiProbes) {
+    const status = await fire();
+    if (status === 500 || status === 'threw') throw new Error(`API probe "${name}" produced ${status}`);
+    console.log(`  api ${String(status).padEnd(6)} <- ${name}`);
+  }
+
+  // The tables the injection tried to drop must still answer.
+  const board = await fetch(`${URL}/api/leaderboard`);
+  if (!board.ok) throw new Error('leaderboard broke after the injection probes');
+
   await sleep(1500);
   const during = await health();
   console.log('health after abuse:', during);

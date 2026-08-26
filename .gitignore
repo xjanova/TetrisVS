@@ -11,3 +11,9 @@ coverage/
 .live-player-*/
 artifacts/
 *.log
+
+# the SQLite database holds password hashes and session digests — never commit it
+data/
+*.db
+*.db-wal
+*.db-shm

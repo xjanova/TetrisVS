@@ -8,9 +8,10 @@ the client and server.
 
 ```
 packages/
-  core/      @tetrisvs/core   — deterministic simulation   (claude)  ✅ done
-  client/    Vite + React + Canvas renderer, input, audio  (codex)   ✅ M1
-  server/    Node + Socket.IO authoritative server         (codex)   ✅ M2 scaffold
+  core/      @tetrisvs/core   — deterministic simulation, replay + delta codecs
+  store/     @tetrisvs/store  — SQLite persistence: accounts, matches, replays
+  client/    Vite + React + Canvas renderer, input, audio
+  server/    Node + Socket.IO authoritative server + HTTP API
 ```
 
 ## Stack
@@ -58,11 +59,41 @@ a stale `@tetrisvs/core` and fail on anything newly exported.
 ```bash
 npm run e2e:local     # local 2P in a real browser: tick rate, pause, blur, rematch
 npm run e2e:online    # two browsers, matchmaking, disconnect, requeue, result
-npm run smoke:abuse   # hostile payloads against a running server
+npm run smoke:abuse   # hostile payloads at the sockets AND the HTTP API
+npm run smoke:store   # accounts, a real match, the leaderboard, replay fidelity
 ```
 
-The browser harnesses need `npm run dev` up; the abuse smoke needs
-`npm run server`. Set `CHROME_PATH` if Chrome is not at the Windows default.
+The browser harnesses need `npm run dev` up; `smoke:abuse` needs `npm run server`
+(`smoke:store` starts its own throwaway server). Set `CHROME_PATH` if Chrome is
+not at the Windows default.
+
+## Persistence
+
+The server keeps its data in SQLite, in-process — no daemon, no credentials, no
+network hop between a match ending and the row landing.
+
+```bash
+TETRISVS_DB=./data/tetrisvs.db   # default
+TETRISVS_TRUST_PROXY=1           # only behind a proxy you control
+```
+
+| endpoint | |
+|---|---|
+| `POST /api/register` `POST /api/login` | `{username, password}` → bearer token |
+| `POST /api/logout` · `GET /api/me` | bearer token |
+| `GET /api/leaderboard` · `/api/matches` · `/api/matches/:id` | public |
+| `GET /api/matches/:id/replay` | the input log, as bytes |
+| `GET /api/players/:name` · `GET /api/stats` | public; `/api/stats` is aggregate only |
+| `GET /health` | includes write-queue depth |
+
+Pass the token as `auth: { token }` in the Socket.IO handshake and matches are
+attributed to the account. Without one you play as a guest: the match is still
+recorded, it just earns nobody a rating.
+
+**Replays are the seed plus the input log** — the simulation is deterministic,
+so that is a complete recording. A three-minute match is a couple of kB, and
+`smoke:store` asserts that a downloaded replay hashes identically to the state
+the client saw over the wire.
 
 ## Stability notes
 
@@ -84,6 +115,18 @@ Things that are load-bearing and easy to undo by accident:
 - **The renderer caches its art.** Backdrop, grid, and per-colour block sprites
   are baked into offscreen canvases; effect decay integrates real elapsed time
   so a 144 Hz monitor does not play everything 2.4x too fast.
+- **The database is never touched from the tick path.** `better-sqlite3` is
+  synchronous, and this process runs a 60 Hz simulation in the same event loop.
+  Match results go through `store.recordMatch()`, which only appends to an
+  in-memory queue; a separate timer writes the batch. `/health` reports the
+  queue depth and the slowest flush.
+- **Passwords are scrypt, hashed asynchronously.** `scryptSync` would spend
+  ~90 ms blocking the loop — six dropped game ticks per login. Sessions are
+  stored as a SHA-256 digest, never as the token itself.
+- **Nothing from a socket or a request body is trusted.** Usernames pass a
+  whitelist, every statement binds its parameters, bodies are capped at 4 kB,
+  and both `smoke:abuse` and the store's own suite fire the payloads that
+  matter (injection, prototype pollution, oversized arrays) at them.
 
 Core API and rendering guide: [`packages/core/README.md`](packages/core/README.md).
 

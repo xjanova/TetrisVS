@@ -49,4 +49,10 @@ export type EndReason = 'topout' | 'forfeit';
 export interface SocketData {
   roomCode?: string;
   playerId?: PlayerId;
+  /**
+   * Resolved from the handshake bearer token against the database — never from
+   * anything the client asserts about itself. Absent means "playing as a guest".
+   */
+  accountId?: number;
+  username?: string;
 }

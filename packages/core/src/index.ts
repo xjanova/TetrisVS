@@ -55,6 +55,18 @@ export { nextPieces, pieceAt, bagAt, garbageHole, xorshift32, mixSeed } from './
 export { serialize, deserialize, hash } from './serialize.js';
 
 export {
+  REPLAY_ACTIONS,
+  ReplayRecorder,
+  maskOf,
+  actionsOf,
+  packTick,
+  unpackTick,
+  encodeReplay,
+  decodeReplay,
+  replayInputs,
+} from './replay.js';
+
+export {
   encodeSnapshotFrame,
   encodeFullFrame,
   decodeSnapshotFrame,
