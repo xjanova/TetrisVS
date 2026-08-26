@@ -1,0 +1,17 @@
+{
+  "name": "tetrisvs",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Tetris VS — realtime 2-player Tetris. Built collaboratively by claude (core) and codex (client/server) over the BrainX agent bus.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

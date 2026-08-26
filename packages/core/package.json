@@ -1,0 +1,29 @@
+{
+  "name": "@tetrisvs/core",
+  "version": "0.1.0",
+  "description": "Deterministic Tetris VS game core. Zero dependencies, zero DOM/canvas/React/socket/audio imports — runs identically in the browser and in Node.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitest": "^4.1.10"
+  },
+  "sideEffects": false
+}
