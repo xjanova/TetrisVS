@@ -6,3 +6,8 @@ coverage/
 .vite/
 .env
 .env.local
+
+# throwaway Chrome profiles and logs produced by scripts/
+.live-player-*/
+artifacts/
+*.log

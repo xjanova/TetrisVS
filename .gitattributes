@@ -1,0 +1,9 @@
+# Two agents and two editors share this tree on Windows. Pin line endings so a
+# checkout never rewrites every file and turns the next diff into noise.
+* text=auto eol=lf
+
+# Never touch binaries.
+*.webp binary
+*.mp4  binary
+*.webm binary
+*.png  binary
