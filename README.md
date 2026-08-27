@@ -84,7 +84,30 @@ TETRISVS_TRUST_PROXY=1           # only behind a proxy you control
 | `GET /api/leaderboard` · `/api/matches` · `/api/matches/:id` | public |
 | `GET /api/matches/:id/replay` | the input log, as bytes |
 | `GET /api/players/:name` · `GET /api/stats` | public; `/api/stats` is aggregate only |
+| `GET /api/status` | public: operator notice, maintenance flag, live counts |
 | `GET /health` | includes write-queue depth |
+
+## Operator console
+
+`http://<server>:3001/admin` — one self-contained page, no build step, served by
+the game server itself so it works even when the client build is broken.
+
+**First run:** create a normal account in the game (or via `POST /api/register`),
+sign into the console with it, and press **CLAIM OWNER**. That promotion is only
+possible while zero operators exist, and the check-and-promote happens inside one
+transaction, so a second claimant gets a 409 rather than a race.
+
+Live: rooms with frame counts and per-seat stats, connections, tick rate, write
+queue depth, memory, today's totals, the leaderboard, and an operator log.
+Controls: close a stuck room, kick a connection, ban/unban, grant or revoke
+operator roles, flush the write queue, toggle maintenance mode, and push a notice
+to every player — including those sitting on the menu, who have no socket yet and
+read it from `/api/status`.
+
+> **The guard is the whole thing.** `requireOperator` resolves the session **and
+> then checks the role**. A guard that only asks "is there a bearer token?" lets
+> any signed-in player run every route on this page; `packages/store/test/
+> admin.test.ts` asserts it does not.
 
 Pass the token as `auth: { token }` in the Socket.IO handshake and matches are
 attributed to the account. Without one you play as a guest: the match is still

@@ -10,9 +10,11 @@
  * writes go through `Store.recordMatch()`, which only enqueues.
  */
 
+import { AdminStore } from './admin.js';
 import { closeDatabase, maintain, migrate, openDatabase, schemaVersion, type Db, type StoreOptions } from './db.js';
 import { MatchStore, type MatchRecord } from './matches.js';
 import { PlayerStore } from './players.js';
+import type { ScryptParams } from './passwords.js';
 import { WriteQueue, type QueueStats } from './queue.js';
 
 export { openDatabase, closeDatabase, migrate, maintain, schemaVersion };
@@ -44,6 +46,7 @@ export {
   type AuthFailure,
   type AuthResult,
   type Player,
+  type PlayerStoreOptions,
 } from './players.js';
 
 export {
@@ -64,7 +67,18 @@ export {
 
 export { WriteQueue, type QueueOptions, type QueueStats } from './queue.js';
 
+export {
+  AdminStore,
+  ROLES,
+  type AdminPlayer,
+  type AuditEntry,
+  type Role,
+  type SetupResult,
+} from './admin.js';
+
 export interface TetrisStoreOptions extends StoreOptions {
+  /** scrypt cost override; see `PlayerStoreOptions`. */
+  passwordParams?: ScryptParams;
   /** How often queued matches are written. */
   flushIntervalMs?: number;
   /** How often expired sessions and stale rate-limit rows are swept. */
@@ -80,6 +94,7 @@ export class TetrisStore {
   readonly db: Db;
   readonly players: PlayerStore;
   readonly matches: MatchStore;
+  readonly admin: AdminStore;
 
   private readonly queue: WriteQueue<MatchRecord>;
   private pruneTimer: ReturnType<typeof setInterval> | null = null;
@@ -90,8 +105,9 @@ export class TetrisStore {
   constructor(options: TetrisStoreOptions) {
     this.onError = options.onError;
     this.db = openDatabase(options);
-    this.players = new PlayerStore(this.db);
+    this.players = new PlayerStore(this.db, { params: options.passwordParams });
     this.matches = new MatchStore(this.db);
+    this.admin = new AdminStore(this.db);
     this.pruneIntervalMs = options.pruneIntervalMs ?? 10 * 60 * 1000;
 
     this.queue = new WriteQueue<MatchRecord>({

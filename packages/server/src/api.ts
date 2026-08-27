@@ -16,6 +16,9 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { TetrisStore } from '@tetrisvs/store';
+import { handleAdmin } from './admin-api.js';
+import { CONSOLE_HTML } from './console-page.js';
+import type { GameControl } from './control.js';
 
 /** Bodies are usernames and passwords, not uploads. */
 const MAX_BODY_BYTES = 4 * 1024;
@@ -27,6 +30,8 @@ const RATE_MAX_REQUESTS = 240;
 
 export interface ApiOptions {
   store: TetrisStore;
+  /** The operator's handle on the running game. */
+  control: GameControl;
   /**
    * Honour `X-Forwarded-For`. Only enable behind a proxy you control: the
    * header is client-supplied, so trusting it anywhere else lets anyone forge
@@ -78,7 +83,27 @@ export class Api {
   async handle(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
     const url = new URL(request.url ?? '/', 'http://internal');
     const path = url.pathname;
-    if (path !== '/health' && !path.startsWith('/api/')) return false;
+    const isConsole = path === '/admin' || path === '/admin/';
+    if (path !== '/health' && !path.startsWith('/api/') && !isConsole) return false;
+
+    // The console is a page, not an API: it is same-origin only and must not be
+    // fetchable cross-site.
+    if (isConsole) {
+      if (request.method !== 'GET') {
+        response.writeHead(405).end();
+        return true;
+      }
+      response.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-store',
+        'x-content-type-options': 'nosniff',
+        'referrer-policy': 'no-referrer',
+        // Everything the page needs is inline; nothing may be pulled in.
+        'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      });
+      response.end(CONSOLE_HTML);
+      return true;
+    }
 
     cors(response);
     if (request.method === 'OPTIONS') {
@@ -112,6 +137,23 @@ export class Api {
     const { store } = this.options;
     const method = request.method ?? 'GET';
     const limit = numberParam(url.searchParams.get('limit'), 20);
+
+    // ---------------------------------------------------------- admin
+    if (path.startsWith('/api/admin/')) {
+      const handled = await handleAdmin(path, method, {
+        store,
+        control: this.options.control,
+        address,
+        bearer: bearer(request),
+        query: url.searchParams,
+        body: method === 'POST' ? await readJson(request, response) : null,
+        send: (status, payload) => {
+          if (!response.headersSent) send(response, status, payload);
+        },
+      });
+      // A POST whose body was rejected has already been answered.
+      if (handled || response.headersSent) return;
+    }
 
     if (path === '/health') {
       send(response, 200, {
@@ -171,6 +213,21 @@ export class Api {
 
     if (path === '/api/matches' && method === 'GET') {
       send(response, 200, { matches: store.matches.recent(limit) });
+      return;
+    }
+
+    if (path === '/api/status' && method === 'GET') {
+      // Public and deliberately thin: an operator notice, whether matchmaking is
+      // open, and two counts. Nothing here identifies anybody, so the menu can
+      // poll it without a session.
+      const view = this.options.control.view();
+      send(response, 200, {
+        online: true,
+        notice: view.notice,
+        maintenance: view.maintenance,
+        playersOnline: view.connections.length,
+        activeMatches: view.rooms.filter((room) => room.status !== 'finished').length,
+      });
       return;
     }
 

@@ -12,6 +12,7 @@ import type { ClientToServerEvents, EndReason, ServerToClientEvents, SocketData 
 import { MatchmakingQueue } from './matchmaker.js';
 import { normalizeRoomCode, sanitizeInput, shouldReap, type BufferedInput } from './guards.js';
 import { Api } from './api.js';
+import type { ConnectionView, GameControl, RoomView, ServerView } from './control.js';
 
 type GameSocket = Socket<ClientToServerEvents, ServerToClientEvents, Record<string, never>, SocketData>;
 
@@ -109,8 +110,49 @@ const store = new TetrisStore({
 });
 store.start();
 
+const control: GameControl = {
+  view: buildView,
+  closeRoom: (code, reason) => {
+    const room = rooms.get(code);
+    if (!room) return false;
+    // Whoever is still connected wins; if both are gone it is a draw.
+    const winner: PlayerId | null = room.sockets[0] && !room.sockets[1] ? 0 : !room.sockets[0] && room.sockets[1] ? 1 : null;
+    io.to(code).emit('server:notice', reason);
+    conclude(room, winner, 'forfeit');
+    return true;
+  },
+  kick: (socketId, reason) => {
+    const target = io.sockets.sockets.get(socketId) as GameSocket | undefined;
+    if (!target) return false;
+    target.emit('server:kicked', reason);
+    // Give the event a tick to leave before the socket goes.
+    setTimeout(() => target.disconnect(true), 50).unref();
+    return true;
+  },
+  disconnectAccount: (accountId, reason) => {
+    let dropped = 0;
+    for (const socket of io.sockets.sockets.values()) {
+      const game = socket as GameSocket;
+      if (game.data.accountId !== accountId) continue;
+      game.emit('server:kicked', reason);
+      setTimeout(() => game.disconnect(true), 50).unref();
+      dropped++;
+    }
+    return dropped;
+  },
+  setMaintenance: (on) => {
+    maintenance = on;
+    io.emit('server:notice', on ? (notice ?? 'Server is in maintenance — no new matches right now.') : notice);
+  },
+  setNotice: (value) => {
+    notice = value;
+    io.emit('server:notice', value);
+  },
+};
+
 const api = new Api({
   store,
+  control,
   // Off by default: `X-Forwarded-For` is client-supplied, so honouring it
   // without a proxy in front lets anyone forge the address every rate limit is
   // keyed on.
@@ -146,6 +188,24 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents, Record<string,
 
 const rooms = new Map<string, Room>();
 const matchmaking = new MatchmakingQueue();
+
+// ---------------------------------------------------------------- operator state
+//
+// Deliberately in memory, not in the database: these are decisions about *this
+// process right now*, and a restart should clear them rather than leave an
+// operator wondering why matchmaking is still refusing players.
+
+let maintenance = false;
+let notice: string | null = null;
+
+/** Simulation steps in the last whole second, for the console's health readout. */
+let ticksThisSecond = 0;
+let measuredHz = TICK_HZ;
+const hzSampler = setInterval(() => {
+  measuredHz = ticksThisSecond;
+  ticksThisSecond = 0;
+}, 1000);
+hzSampler.unref();
 
 // ---------------------------------------------------------------- guards
 
@@ -304,22 +364,101 @@ function leaveCurrentRoom(socket: GameSocket, notifyPeer: boolean): void {
   if (!room.sockets[0] && !room.sockets[1]) rooms.delete(roomCode);
 }
 
+/** Everything the operator console shows, gathered in one pass. */
+function buildView(): ServerView {
+  const now = Date.now();
+  const memory = process.memoryUsage();
+
+  const roomViews: RoomView[] = [];
+  for (const room of rooms.values()) {
+    roomViews.push({
+      code: room.code,
+      status: room.state.status,
+      frame: room.state.frame,
+      seed: room.state.seed | 0,
+      createdAt: room.createdAt,
+      ageSeconds: Math.round((now - room.createdAt) / 1000),
+      concluded: room.concluded,
+      replayTicks: room.recorder.ticks,
+      seats: ([0, 1] as const).map((seat) => {
+        const player = room.state.players[seat];
+        return {
+          seat,
+          connected: room.sockets[seat] !== null,
+          socketId: room.sockets[seat],
+          name: room.identities[seat].name,
+          accountId: room.identities[seat].playerId,
+          alive: player.alive,
+          lines: player.linesCleared,
+          attack: player.attackSent,
+          incoming: player.garbageQueue.reduce((sum, line) => sum + line.amount, 0),
+        };
+      }),
+    });
+  }
+  roomViews.sort((a, b) => a.createdAt - b.createdAt);
+
+  const connections: ConnectionView[] = [];
+  for (const socket of io.sockets.sockets.values()) {
+    const game = socket as GameSocket;
+    connections.push({
+      socketId: game.id,
+      accountId: game.data.accountId ?? null,
+      username: game.data.username ?? null,
+      roomCode: game.data.roomCode ?? null,
+      seat: game.data.playerId ?? null,
+      address: game.data.address ?? 'unknown',
+      connectedForSeconds: Math.round((now - (game.data.connectedAt ?? now)) / 1000),
+    });
+  }
+  connections.sort((a, b) => b.connectedForSeconds - a.connectedForSeconds);
+
+  return {
+    uptimeSeconds: Math.floor(process.uptime()),
+    nodeVersion: process.version,
+    pid: process.pid,
+    memoryMB: Math.round(memory.heapUsed / 1048576),
+    rssMB: Math.round(memory.rss / 1048576),
+    tickHz: TICK_HZ,
+    measuredHz,
+    rooms: roomViews,
+    connections,
+    queuedForMatchmaking: matchmaking.size,
+    maintenance,
+    notice,
+  };
+}
+
 // ---------------------------------------------------------------- connections
 
 io.on('connection', (socket: GameSocket) => {
   // Identity is established once, from the token, before any game event is
   // handled. A client can send whatever it likes in `auth`; only a token that
   // resolves to a live session in the database becomes an account.
+  socket.data.connectedAt = Date.now();
+  socket.data.address = socket.handshake.address ?? 'unknown';
+
   try {
     const token = (socket.handshake.auth as { token?: unknown } | undefined)?.token;
     const player = store.players.resolveSession(token);
     if (player) {
+      // A banned account keeps neither its session nor its socket. `resolveSession`
+      // already refuses banned players, so this is the belt to that braces.
+      if (store.admin.isBanned(player.id)) {
+        socket.emit('server:kicked', 'This account is suspended.');
+        setTimeout(() => socket.disconnect(true), 50).unref();
+        return;
+      }
       socket.data.accountId = player.id;
       socket.data.username = player.username;
       store.players.touch(player.id);
     }
   } catch (error) {
     console.error(`[tetrisvs] session lookup failed for ${socket.id}:`, error);
+  }
+
+  if (notice || maintenance) {
+    socket.emit('server:notice', notice ?? 'Server is in maintenance — no new matches right now.');
   }
 
   socket.on('matchmaking:join', guard(socket, 'matchmaking:join', (pool: unknown, reply: unknown) => {
@@ -329,7 +468,10 @@ io.on('connection', (socket: GameSocket) => {
     void pool;
     const safePool = 'v1-default';
 
-    if (rooms.size >= MAX_ROOMS) {
+    if (maintenance || rooms.size >= MAX_ROOMS) {
+      socket.emit('server:notice', maintenance
+        ? 'Server is in maintenance — no new matches right now.'
+        : 'The server is at capacity. Try again in a moment.');
       ack(reply, { searching: false });
       return;
     }
@@ -374,7 +516,7 @@ io.on('connection', (socket: GameSocket) => {
   socket.on('room:create', guard(socket, 'room:create', (reply: unknown) => {
     matchmaking.remove(socket.id);
     leaveCurrentRoom(socket, true);
-    if (rooms.size >= MAX_ROOMS) {
+    if (maintenance || rooms.size >= MAX_ROOMS) {
       ack(reply, { roomCode: '', playerId: 0 });
       return;
     }
@@ -407,6 +549,10 @@ io.on('connection', (socket: GameSocket) => {
     }
     if (room.state.status === 'finished') {
       ack(reply, { ok: false, reason: 'Match already finished' });
+      return;
+    }
+    if (maintenance) {
+      ack(reply, { ok: false, reason: 'Server is in maintenance' });
       return;
     }
 
@@ -487,6 +633,9 @@ function broadcast(room: Room, events: ReturnType<typeof step>['events']): void 
 }
 
 function tickRooms(): void {
+  // Counted once per simulation step, not once per room: with three rooms the
+  // per-room version reported 180 Hz, and with none it reported 0.
+  ticksThisSecond++;
   for (const room of rooms.values()) {
     room.budget[0] = INPUT_BUDGET_PER_TICK;
     room.budget[1] = INPUT_BUDGET_PER_TICK;
@@ -574,6 +723,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     console.log(`[tetrisvs] ${signal} — closing`);
     clearInterval(pump);
     clearInterval(janitor);
+    clearInterval(hzSampler);
     // Flush queued results before the process goes away.
     store.close();
     io.close(() => http.close(() => process.exit(0)));

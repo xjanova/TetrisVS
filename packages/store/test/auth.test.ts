@@ -24,7 +24,7 @@ const FAST = { N: 1024, r: 8, p: 1, keylen: 32 };
 
 beforeEach(() => {
   db = openDatabase({ file: ':memory:' });
-  players = new PlayerStore(db);
+  players = new PlayerStore(db, { params: FAST });
 });
 
 afterEach(() => {

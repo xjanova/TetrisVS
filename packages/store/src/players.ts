@@ -10,7 +10,7 @@
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Database as Db, Statement } from 'better-sqlite3';
-import { dummyVerify, hashPassword, needsRehash, verifyPassword, type StoredPassword } from './passwords.js';
+import { DEFAULT_PARAMS, dummyVerify, hashPassword, needsRehash, verifyPassword, type ScryptParams, type StoredPassword } from './passwords.js';
 
 // ---------------------------------------------------------------- policy
 
@@ -56,6 +56,7 @@ export type AuthFailure =
   | 'username-taken'
   | 'password-weak'
   | 'credentials'
+  | 'banned'
   | 'rate-limited';
 
 export type AuthResult =
@@ -79,6 +80,8 @@ interface PlayerRow {
   attack: number;
   best_attack: number;
   rating: number;
+  banned_at?: number | null;
+  ban_reason?: string | null;
 }
 
 function toPlayer(row: PlayerRow): Player {
@@ -121,7 +124,22 @@ function hashToken(token: string): Buffer {
 
 // ---------------------------------------------------------------- store
 
+export interface PlayerStoreOptions {
+  /**
+   * scrypt cost for new hashes and for the decoy verification an unknown
+   * username triggers.
+   *
+   * Configurable because the right number depends on the box: the default
+   * spends ~90 ms and 32 MiB per attempt, which is the point, but it also means
+   * the rate limiter is what bounds how much work a stranger can make the
+   * server do. Tests lower it so a suite that exercises the lockout does not
+   * spend three seconds proving scrypt is slow.
+   */
+  params?: ScryptParams;
+}
+
 export class PlayerStore {
+  private readonly params: ScryptParams;
   private readonly insertPlayer: Statement;
   private readonly byFold: Statement;
   private readonly byIdStmt: Statement;
@@ -141,7 +159,8 @@ export class PlayerStore {
   private readonly registrationsForSource: Statement;
   private readonly pruneAttempts: Statement;
 
-  constructor(private readonly db: Db) {
+  constructor(private readonly db: Db, options: PlayerStoreOptions = {}) {
+    this.params = options.params ?? DEFAULT_PARAMS;
     this.insertPlayer = db.prepare(`
       INSERT INTO players (username, username_fold, password_hash, password_salt, password_params, created_at)
       VALUES (@username, @fold, @hash, @salt, @params, @now)
@@ -228,7 +247,7 @@ export class PlayerStore {
       return { ok: false, reason: 'username-taken', message: 'That name is taken.' };
     }
 
-    const stored = await hashPassword(rawPassword);
+    const stored = await hashPassword(rawPassword, this.params);
 
     let id: number;
     try {
@@ -288,7 +307,7 @@ export class PlayerStore {
     // No such user still costs a full scrypt, so response time cannot be used to
     // enumerate accounts.
     if (!row) {
-      await dummyVerify(password || 'x');
+      await dummyVerify(password || 'x', this.params);
       this.recordAttempt.run(normalized?.fold ?? null, source, now, 0);
       return { ok: false, reason: 'credentials', message: 'Wrong name or password.' };
     }
@@ -304,10 +323,20 @@ export class PlayerStore {
       return { ok: false, reason: 'credentials', message: 'Wrong name or password.' };
     }
 
+    // Checked after the password so a ban cannot be probed without credentials.
+    if (row.banned_at != null) {
+      this.recordAttempt.run(row.username_fold, source, now, 0);
+      return {
+        ok: false,
+        reason: 'banned',
+        message: row.ban_reason ? `This account is suspended: ${row.ban_reason}` : 'This account is suspended.',
+      };
+    }
+
     // Successful login is the one moment we hold the plaintext, so it is the
     // only chance to transparently upgrade an old hash.
-    if (needsRehash(stored)) {
-      const upgraded = await hashPassword(password);
+    if (needsRehash(stored, this.params)) {
+      const upgraded = await hashPassword(password, this.params);
       this.updatePassword.run({ id: row.id, hash: upgraded.hash, salt: upgraded.salt, params: upgraded.params });
     }
 
@@ -336,6 +365,12 @@ export class PlayerStore {
     // time anyway so this stays safe if the lookup is ever widened.
     if (row.token_hash.length !== digest.length || !timingSafeEqual(row.token_hash, digest)) return null;
     if (row.expires_at <= now) {
+      this.deleteSession.run(digest);
+      return null;
+    }
+    // Banning drops sessions, but a token minted in the same instant would
+    // otherwise survive. Refuse it here too.
+    if (row.banned_at != null) {
       this.deleteSession.run(digest);
       return null;
     }

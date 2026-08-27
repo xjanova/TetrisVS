@@ -125,4 +125,33 @@ export const MIGRATIONS: readonly Migration[] = [
       ) STRICT;
     `);
   },
+
+  // ---------------------------------------------------------------- 1 -> 2
+  // Operator roles and bans, for the admin console.
+  (db) => {
+    db.exec(`
+      -- 'player' | 'admin' | 'owner'. Checked explicitly on every admin route:
+      -- a guard that only asks "is there a token?" is not a guard.
+      ALTER TABLE players ADD COLUMN role TEXT NOT NULL DEFAULT 'player';
+      -- Non-null means banned. Kept as a timestamp so the ban has a date on it.
+      ALTER TABLE players ADD COLUMN banned_at INTEGER;
+      ALTER TABLE players ADD COLUMN ban_reason TEXT;
+
+      CREATE INDEX players_role ON players(role) WHERE role <> 'player';
+
+      -- Who did what, in the admin console. An operator action with no record
+      -- of who took it is indistinguishable from a compromise.
+      CREATE TABLE admin_audit (
+        id        INTEGER PRIMARY KEY,
+        at        INTEGER NOT NULL,
+        actor_id  INTEGER REFERENCES players(id) ON DELETE SET NULL,
+        actor     TEXT    NOT NULL,
+        action    TEXT    NOT NULL,
+        target    TEXT,
+        detail    TEXT
+      ) STRICT;
+
+      CREATE INDEX admin_audit_at ON admin_audit(at DESC);
+    `);
+  },
 ];

@@ -259,3 +259,54 @@ button:disabled:hover { transform: none; }
   .net-banner { animation: none; opacity: 1; }
   .countdown { animation: none; }
 }
+
+/* --- accounts, leaderboard, and server notices --- */
+.account-card {
+  width: min(420px, 100%); margin: 18px auto 0; display: grid; gap: 18px;
+  padding: 18px; border-radius: 16px;
+  background: linear-gradient(180deg, rgba(16, 18, 42, .82), rgba(9, 11, 29, .82));
+  border: 1px solid rgba(120, 132, 220, .22); backdrop-filter: blur(10px);
+}
+
+.account-tabs { display: flex; gap: 6px; }
+.account-tabs button {
+  flex: 1; padding: 8px; font-size: 11px; font-weight: 800; letter-spacing: .14em;
+  border-radius: 9px; border: 1px solid rgba(120, 132, 220, .25);
+  background: rgba(10, 13, 32, .7); color: #9298b8; cursor: pointer;
+}
+.account-tabs button.active { background: rgba(111, 123, 255, .18); color: #e7ebff; border-color: rgba(111, 123, 255, .6); }
+
+.account-form { display: grid; gap: 9px; }
+.account-form input {
+  padding: 11px 13px; border-radius: 10px; font: inherit; font-size: 13px; letter-spacing: .08em;
+  background: rgba(6, 8, 22, .85); border: 1px solid rgba(120, 132, 220, .25); color: #e7ebff;
+}
+.account-form input:focus { outline: none; border-color: rgba(111, 123, 255, .8); }
+.account-hint { margin: 2px 0 0; font-size: 11px; color: #767ca0; line-height: 1.5; }
+
+.account-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.account-name { font-size: 20px; font-weight: 900; letter-spacing: -.01em; }
+.account-rating { text-align: right; }
+.account-rating span { display: block; font-size: 9px; letter-spacing: .16em; color: #767ca0; }
+.account-rating b { font-size: 24px; font-weight: 900; color: #8fa0ff; font-variant-numeric: tabular-nums; }
+.account-stats { display: flex; gap: 14px; flex-wrap: wrap; margin: 4px 0 8px; }
+.account-stats span { font-size: 9px; letter-spacing: .14em; color: #767ca0; display: block; }
+.account-stats b { font-size: 15px; font-variant-numeric: tabular-nums; }
+
+.leaderboard-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 3px; }
+.leaderboard-list li {
+  display: grid; grid-template-columns: 26px 1fr auto; align-items: center; gap: 10px;
+  padding: 6px 9px; border-radius: 8px; font-size: 13px; background: rgba(8, 10, 26, .6);
+}
+.leaderboard-list li.is-you { background: rgba(111, 123, 255, .16); box-shadow: inset 0 0 0 1px rgba(111, 123, 255, .4); }
+.leaderboard-list .rank { color: #767ca0; font-size: 11px; font-variant-numeric: tabular-nums; }
+.leaderboard-list .rating { color: #8fa0ff; font-weight: 800; font-variant-numeric: tabular-nums; }
+
+.server-notice {
+  position: fixed; z-index: 45; top: 0; left: 0; right: 0; padding: 9px 18px; text-align: center;
+  background: rgba(255, 176, 32, .16); border-bottom: 1px solid rgba(255, 176, 32, .5);
+  color: #ffdf9e; font-size: 12px; font-weight: 700; letter-spacing: .1em; backdrop-filter: blur(8px);
+}
+
+.future-note.online-down i { background: #ff4f70; box-shadow: 0 0 10px #ff4f70; animation: none; }
+.future-note.online-down { color: #ff9fb0; }

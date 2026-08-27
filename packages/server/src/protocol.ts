@@ -41,6 +41,10 @@ export interface ServerToClientEvents {
   'match:update': (update: MatchUpdate) => void;
   'match:ended': (winner: PlayerId | null, reason: EndReason) => void;
   'peer:disconnected': () => void;
+  /** Operator announcement, or `null` to clear it. Sent on connect and on change. */
+  'server:notice': (notice: string | null) => void;
+  /** The server is about to drop this socket, and why. */
+  'server:kicked': (reason: string) => void;
 }
 
 /** Why a match stopped. `forfeit` means the opponent left a live match. */
@@ -55,4 +59,7 @@ export interface SocketData {
    */
   accountId?: number;
   username?: string;
+  /** When this socket connected, for the operator console. */
+  connectedAt?: number;
+  address?: string;
 }

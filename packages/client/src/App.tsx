@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CoreEvent, MatchState, PlayerId } from '@tetrisvs/core';
 import { createMatch, step, TICK_HZ } from '@tetrisvs/core';
+import { AccountPanel } from './components/AccountPanel';
 import { BoardCanvas } from './components/BoardCanvas';
 import { PlayerHud } from './components/PlayerHud';
+import { loadToken, saveToken, status as fetchStatus, type Player, type ServerStatus } from './game/account';
 import { ChipAudio } from './game/audio';
 import { LocalInput } from './game/input';
 import { connectOnline, SnapshotStream, type EndReason, type OnlineSocket } from './game/online';
@@ -58,6 +60,13 @@ export function App() {
   const [onlineError, setOnlineError] = useState('');
   const [endReason, setEndReason] = useState<EndReason>('topout');
   const [busy, setBusy] = useState(false);
+  const [token, setToken] = useState<string | null>(() => loadToken());
+  const [account, setAccount] = useState<Player | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [kicked, setKicked] = useState<string | null>(null);
+  const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
+  /** The socket handshake reads this, so it must not lag behind React state. */
+  const tokenRef = useRef<string | null>(token);
   /** Synchronous mirror of `busy` — React state lands too late to stop a double-click. */
   const busyRef = useRef(false);
 
@@ -74,6 +83,20 @@ export function App() {
    * a second live socket behind, still emitting into a room nobody was in.
    */
   const generation = useRef(0);
+
+  const signIn = useCallback((next: string, player: Player) => {
+    tokenRef.current = next;
+    saveToken(next);
+    setToken(next);
+    setAccount(player);
+  }, []);
+
+  const signOut = useCallback(() => {
+    tokenRef.current = null;
+    saveToken(null);
+    setToken(null);
+    setAccount(null);
+  }, []);
 
   const clearResultTimer = useCallback(() => {
     if (resultTimer.current) window.clearTimeout(resultTimer.current);
@@ -165,7 +188,8 @@ export function App() {
     setEndReason('topout');
     stateRef.current = null;
 
-    const socket = connectOnline();
+    // Guests are welcome; a token just attributes the match to an account.
+    const socket = connectOnline(tokenRef.current);
     socketRef.current = socket;
 
     const live = () => generation.current === token && socketRef.current === socket;
@@ -235,9 +259,18 @@ export function App() {
       clearResultTimer();
       setRoomStatus('disconnected');
     });
+    socket.on('server:notice', (message) => {
+      if (live()) setNotice(message);
+    });
+    socket.on('server:kicked', (reason) => {
+      if (!live()) return;
+      setKicked(reason);
+      // A suspended account's stored token is dead; do not keep offering it.
+      if (/suspend/i.test(reason)) signOut();
+    });
 
     return { socket, token };
-  }, [applyEvents, audio, clearResultTimer, disconnectOnline, scheduleResults, stream]);
+  }, [applyEvents, audio, clearResultTimer, disconnectOnline, scheduleResults, signOut, stream]);
 
   /** Wrap an async flow so a rejection surfaces in the UI instead of vanishing. */
   const run = useCallback((label: string, flow: () => Promise<void>) => {
@@ -323,6 +356,35 @@ export function App() {
     input.attach();
     return () => input.detach();
   }, [input, scene]);
+
+  /**
+   * A socket only exists once a player starts an online flow, so an operator
+   * notice would otherwise never reach anyone sitting on the menu. Poll for it
+   * there instead — the endpoint is public and carries no personal data.
+   */
+  useEffect(() => {
+    if (scene !== 'menu') return;
+    let cancelled = false;
+    const poll = () => {
+      fetchStatus()
+        .then((result) => {
+          if (cancelled) return;
+          if (result.status === 200) {
+            setServerStatus(result.body);
+            setNotice(result.body.notice);
+          } else setServerStatus(null);
+        })
+        .catch(() => {
+          if (!cancelled) setServerStatus(null);
+        });
+    };
+    poll();
+    const timer = window.setInterval(poll, 15_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [scene]);
 
   useEffect(() => {
     pausedRef.current = paused;
@@ -463,6 +525,17 @@ export function App() {
     <main className={`app scene-${scene}`} data-match-status={match?.status ?? 'none'} data-frame={match?.frame ?? 0}>
       <div className="ambient ambient-one" />
       <div className="ambient ambient-two" />
+      {notice && <div className="server-notice" role="status">{notice}</div>}
+      {kicked && (
+        <div className="modal-backdrop">
+          <div className="pause-card">
+            <div className="eyebrow">DISCONNECTED BY THE SERVER</div>
+            <h2>REMOVED</h2>
+            <p className="disconnect-copy">{kicked}</p>
+            <button className="primary-button" onClick={() => { setKicked(null); returnToMenu(); }}>BACK TO MENU</button>
+          </div>
+        </div>
+      )}
       <header className="topbar">
         <div className="mini-logo"><span>TETRIS</span><b>VS</b></div>
         <button className="icon-button" onClick={() => setMuted((value) => !value)} aria-label="Toggle sound">
@@ -493,13 +566,27 @@ export function App() {
             </div>
             {onlineError && <div className="online-error">{onlineError}</div>}
           </div>
+          <AccountPanel
+            token={token}
+            player={account}
+            onSignedIn={signIn}
+            onSignedOut={signOut}
+            onPlayerRefreshed={setAccount}
+          />
           <div className="control-card">
             <div className="control-head"><span>ACTION</span><b>PLAYER 1</b><b>PLAYER 2</b></div>
             {CONTROL_ROWS.map(([action, p1, p2]) => (
               <div className="control-row" key={action}><span>{action}</span><kbd>{p1}</kbd><kbd>{p2}</kbd></div>
             ))}
           </div>
-          <div className="future-note online-ready"><i />ONLINE MATCHMAKING // LIVE</div>
+          <div className={`future-note ${serverStatus ? 'online-ready' : 'online-down'}`}>
+            <i />
+            {serverStatus
+              ? serverStatus.maintenance
+                ? 'SERVER IN MAINTENANCE // LOCAL PLAY ONLY'
+                : `ONLINE // ${serverStatus.playersOnline} CONNECTED · ${serverStatus.activeMatches} IN PLAY`
+              : 'SERVER OFFLINE // LOCAL PLAY ONLY'}
+          </div>
         </section>
       )}
 
@@ -524,7 +611,7 @@ export function App() {
       {match && (scene === 'match' || scene === 'results') && (
         <section className="battle-screen">
           <div className="player-zone player-zone--one">
-            <div className="player-title"><small>PLAYER</small><strong>01</strong><span>{online && onlineRole === 0 ? 'YOU · WASD' : 'WASD'}</span></div>
+            <div className="player-title"><small>PLAYER</small><strong>01</strong><span>{online && onlineRole === 0 ? `YOU · ${account?.username ?? 'WASD'}` : 'WASD'}</span></div>
             <PlayerHud state={match} playerId={0} />
             <div className="board-shell"><BoardCanvas player={match.players[0]} events={eventsP1} eventId={batch.id} /></div>
           </div>
@@ -536,7 +623,7 @@ export function App() {
               : <button className="pause-button" onClick={() => setPaused((value) => !value)}>{paused ? 'RESUME' : 'PAUSE'}</button>}
           </div>
           <div className="player-zone player-zone--two">
-            <div className="player-title"><small>PLAYER</small><strong>02</strong><span>{online && onlineRole === 1 ? 'YOU · WASD' : 'ARROWS'}</span></div>
+            <div className="player-title"><small>PLAYER</small><strong>02</strong><span>{online && onlineRole === 1 ? `YOU · ${account?.username ?? 'WASD'}` : 'ARROWS'}</span></div>
             <div className="board-shell"><BoardCanvas player={match.players[1]} events={eventsP2} eventId={batch.id} /></div>
             <PlayerHud state={match} playerId={1} />
           </div>

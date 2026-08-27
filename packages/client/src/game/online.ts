@@ -19,6 +19,8 @@ interface ServerEvents {
   'match:update': (update: MatchUpdate) => void;
   'match:ended': (winner: PlayerId | null, reason: EndReason) => void;
   'peer:disconnected': () => void;
+  'server:notice': (notice: string | null) => void;
+  'server:kicked': (reason: string) => void;
 }
 
 interface ClientEvents {
@@ -32,10 +34,15 @@ interface ClientEvents {
 
 export type OnlineSocket = Socket<ServerEvents, ClientEvents>;
 
-export function connectOnline(): OnlineSocket {
+/**
+ * @param token session token, so the server can attribute the match to an
+ *              account. Omit it and you play as a guest.
+ */
+export function connectOnline(token?: string | null): OnlineSocket {
   const configured = import.meta.env.VITE_SERVER_URL as string | undefined;
   const url = configured ?? `${window.location.protocol}//${window.location.hostname}:3001`;
   return io(url, {
+    auth: token ? { token } : {},
     // WebSocket first, but keep the long-poll fallback: networks that block the
     // upgrade used to look to the player like "server is down".
     transports: ['websocket', 'polling'],
