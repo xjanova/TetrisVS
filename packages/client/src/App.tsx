@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CoreEvent, MatchState, PlayerId } from '@tetrisvs/core';
-import { createMatch, step, TICK_HZ } from '@tetrisvs/core';
+import type { CoreEvent, MatchConfig, MatchState, PlayerId } from '@tetrisvs/core';
+import { createMatch, DEFAULT_CONFIG, levelAt, step, TICK_HZ } from '@tetrisvs/core';
+import { Bot, DIFFICULTIES, DIFFICULTY_ORDER, type Difficulty } from '@tetrisvs/bot';
 import { AccountPanel } from './components/AccountPanel';
 import { BoardCanvas } from './components/BoardCanvas';
 import { PlayerHud } from './components/PlayerHud';
 import { loadToken, saveToken, status as fetchStatus, type Player, type ServerStatus } from './game/account';
+import { applyScore, emptyScore, formatScore, loadBest, saveBest, type RunScore } from './game/score';
 import { ChipAudio } from './game/audio';
 import { LocalInput } from './game/input';
 import { connectOnline, SnapshotStream, type EndReason, type OnlineSocket } from './game/online';
 
 type Scene = 'menu' | 'room' | 'match' | 'results';
-type MatchMode = 'local' | 'online';
+type MatchMode = 'local' | 'online' | 'ai' | 'solo';
 type RoomStatus =
   | 'idle' | 'connecting' | 'searching' | 'waiting' | 'matched'
   | 'connected' | 'reconnecting' | 'disconnected';
@@ -39,6 +41,39 @@ const INPUT_HEARTBEAT_TICKS = 20;
 /** Delay between a match ending and the result card, so the last effects land. */
 const RESULT_DELAY_MS = 800;
 
+/** Seat 1 is not simulated in a solo run; see `MatchConfig.solo`. */
+const SOLO_CONFIG: MatchConfig = { ...DEFAULT_CONFIG, solo: true };
+
+const DIFFICULTY_LABEL: Record<Difficulty, string> = {
+  rookie: 'ROOKIE',
+  steady: 'STEADY',
+  sharp: 'SHARP',
+  ruthless: 'RUTHLESS',
+};
+
+const DIFFICULTY_BLURB: Record<Difficulty, string> = {
+  rookie: 'Slow hands, frequent mistakes. Tops out on its own.',
+  steady: 'Keeps a clean stack. Beatable with pressure.',
+  sharp: 'Fast and rarely wrong.',
+  ruthless: 'A key every frame, no mistakes. Good luck.',
+};
+
+const DIFFICULTY_KEY = 'tetrisvs.difficulty';
+
+function loadDifficulty(): Difficulty {
+  try {
+    const stored = window.localStorage.getItem(DIFFICULTY_KEY);
+    if (stored && (DIFFICULTY_ORDER as readonly string[]).includes(stored)) return stored as Difficulty;
+  } catch {
+    /* private mode */
+  }
+  return 'steady';
+}
+
+function idleFor(frame: number) {
+  return { frame, pressed: [], held: [] };
+}
+
 function makeSeed() {
   const data = new Uint32Array(1);
   crypto.getRandomValues(data);
@@ -65,6 +100,10 @@ export function App() {
   const [notice, setNotice] = useState<string | null>(null);
   const [kicked, setKicked] = useState<string | null>(null);
   const [serverStatus, setServerStatus] = useState<ServerStatus | null>(null);
+  const [difficulty, setDifficulty] = useState<Difficulty>(() => loadDifficulty());
+  const [runScore, setRunScore] = useState<RunScore>(() => emptyScore());
+  const [best, setBest] = useState(() => loadBest());
+  const [newRecord, setNewRecord] = useState(false);
   /** The socket handshake reads this, so it must not lag behind React state. */
   const tokenRef = useRef<string | null>(token);
   /** Synchronous mirror of `busy` — React state lands too late to stop a double-click. */
@@ -75,6 +114,16 @@ export function App() {
   const input = useMemo(() => new LocalInput(), []);
   const audio = useMemo(() => new ChipAudio(), []);
   const stream = useMemo(() => new SnapshotStream(), []);
+  /** Plays seat 1 in an AI match. Reset between matches so no plan carries over. */
+  const bot = useMemo(() => new Bot(1, DIFFICULTIES.steady), []);
+  /**
+   * The config the loop steps with. Solo needs `solo: true`, and passing the
+   * wrong one silently changes the rules — so it is read from a ref the loop
+   * owns rather than recomputed from `mode` inside the closure.
+   */
+  const configRef = useRef<MatchConfig>(DEFAULT_CONFIG);
+  const scoreRef = useRef<RunScore>(emptyScore());
+  const modeRef = useRef<MatchMode>('local');
   const resultTimer = useRef(0);
   const socketRef = useRef<OnlineSocket | null>(null);
   /**
@@ -137,7 +186,11 @@ export function App() {
     setOnlineError('');
   }, [audio, clearResultTimer, disconnectOnline, input]);
 
-  const startLocalMatch = useCallback(async () => {
+  /**
+   * Start anything that runs entirely in this tab: local 2P, versus the AI, or
+   * a solo run. They share a loop and differ only in who fills seat 1.
+   */
+  const startOfflineMatch = useCallback(async (next: Exclude<MatchMode, 'online'>) => {
     generation.current++;
     clearResultTimer();
     disconnectOnline();
@@ -145,8 +198,21 @@ export function App() {
     // the match from starting.
     await audio.unlock();
     audio.startMusic();
-    const initial = createMatch(makeSeed());
+
+    const config = next === 'solo' ? SOLO_CONFIG : DEFAULT_CONFIG;
+    configRef.current = config;
+    modeRef.current = next;
+    if (next === 'ai') {
+      bot.setDifficulty(difficulty);
+    } else {
+      bot.reset();
+    }
+
+    const initial = createMatch(makeSeed(), config);
     stateRef.current = initial;
+    scoreRef.current = emptyScore();
+    setRunScore(scoreRef.current);
+    setNewRecord(false);
     setMatch(initial);
     setBatch({ id: 0, events: [] });
     setCountdown(3);
@@ -154,9 +220,18 @@ export function App() {
     setEndReason('topout');
     setRoomStatus('idle');
     setOnlineError('');
-    setMode('local');
+    setMode(next);
     setScene('match');
-  }, [audio, clearResultTimer, disconnectOnline]);
+  }, [audio, bot, clearResultTimer, difficulty, disconnectOnline]);
+
+  const chooseDifficulty = useCallback((next: Difficulty) => {
+    setDifficulty(next);
+    try {
+      window.localStorage.setItem(DIFFICULTY_KEY, next);
+    } catch {
+      /* private mode */
+    }
+  }, []);
 
   const applyEvents = useCallback((events: CoreEvent[]) => {
     if (!events.length) return;
@@ -484,9 +559,22 @@ export function App() {
       accumulator += elapsed;
       let iterations = 0;
       const collected: CoreEvent[] = [];
+      const config = configRef.current;
+      const offlineMode = modeRef.current;
 
       while (accumulator >= TICK_MS && iterations < MAX_STEPS_PER_FRAME && stateRef.current) {
-        const result = step(stateRef.current, input.consume(stateRef.current.frame));
+        const current = stateRef.current;
+        let inputs;
+        if (offlineMode === 'local') {
+          // Two people, one keyboard: each control scheme drives its own seat.
+          inputs = input.consume(current.frame);
+        } else {
+          // One person: either scheme drives seat 0, and seat 1 is the bot (or
+          // nobody at all, in a solo run).
+          const human = input.consumeMerged(current.frame);
+          inputs = [human, offlineMode === 'ai' ? bot.think(current) : idleFor(current.frame)] as const;
+        }
+        const result = step(current, inputs as Parameters<typeof step>[1], config);
         stateRef.current = result.state;
         if (result.events.length) collected.push(...result.events);
         accumulator -= TICK_MS;
@@ -496,13 +584,35 @@ export function App() {
       if (accumulator > TICK_MS) accumulator = 0;
 
       if (iterations && stateRef.current) setMatch(stateRef.current);
+      if (collected.length && stateRef.current) {
+        const scored = applyScore(scoreRef.current, collected, 0, levelAt(stateRef.current.frame, config));
+        if (scored !== scoreRef.current) {
+          scoreRef.current = scored;
+          setRunScore(scored);
+        }
+      }
       applyEvents(collected);
       if (stateRef.current?.status === 'finished') scheduleResults();
     };
 
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [applyEvents, input, mode, scene, scheduleResults]);
+  }, [applyEvents, bot, input, mode, scene, scheduleResults]);
+
+  /**
+   * Record a solo run once it is over. Deliberately local-only: the server
+   * cannot verify a match played entirely in this tab, so submitting it to the
+   * rating leaderboard would just be a spoofable endpoint.
+   */
+  useEffect(() => {
+    if (scene !== 'results' || modeRef.current !== 'solo' || !match) return;
+    const run = { score: scoreRef.current.score, lines: scoreRef.current.lines, frames: match.frame, at: Date.now() };
+    if (run.score <= 0) return;
+    if (saveBest(run)) {
+      setNewRecord(true);
+      setBest(run);
+    }
+  }, [match, scene]);
 
   // ---------------------------------------------------------------- render
 
@@ -520,6 +630,16 @@ export function App() {
   }, [batch]);
 
   const online = mode === 'online';
+
+  const seatOneLabel = online
+    ? (onlineRole === 0 ? `YOU · ${account?.username ?? 'WASD'}` : 'OPPONENT')
+    : mode === 'local' ? 'WASD'
+    : account?.username ?? 'YOU';
+
+  const seatTwoLabel = online
+    ? (onlineRole === 1 ? `YOU · ${account?.username ?? 'WASD'}` : 'OPPONENT')
+    : mode === 'ai' ? `AI · ${DIFFICULTY_LABEL[difficulty]}`
+    : 'ARROWS';
 
   return (
     <main className={`app scene-${scene}`} data-match-status={match?.status ?? 'none'} data-frame={match?.frame ?? 0}>
@@ -550,7 +670,26 @@ export function App() {
           <p className="tagline">Stack fast. Send garbage. Own the grid.</p>
           <div className="mode-actions">
             <button className="primary-button" disabled={busy} onClick={startQuickMatch}><span>QUICK MATCH</span><i>VS</i></button>
-            <button className="online-button local-button" disabled={busy} onClick={() => run('local', startLocalMatch)}>LOCAL 2P · SAME KEYBOARD</button>
+            <button className="online-button local-button" disabled={busy} onClick={() => run('solo', () => startOfflineMatch('solo'))}>SOLO · PLAY ALONE</button>
+
+            <div className="private-label">VERSUS THE MACHINE</div>
+            <div className="difficulty-row">
+              {DIFFICULTY_ORDER.map((level) => (
+                <button
+                  key={level}
+                  className={`difficulty-chip ${difficulty === level ? 'active' : ''}`}
+                  onClick={() => chooseDifficulty(level)}
+                  aria-pressed={difficulty === level}
+                >
+                  {DIFFICULTY_LABEL[level]}
+                </button>
+              ))}
+            </div>
+            <p className="difficulty-blurb">{DIFFICULTY_BLURB[difficulty]}</p>
+            <button className="online-button" disabled={busy} onClick={() => run('ai', () => startOfflineMatch('ai'))}>PLAY THE AI</button>
+
+            <div className="private-label">TWO PLAYERS, ONE KEYBOARD</div>
+            <button className="online-button local-button" disabled={busy} onClick={() => run('local', () => startOfflineMatch('local'))}>LOCAL 2P</button>
             <div className="private-label">PRIVATE ROOM</div>
             <button className="online-button" disabled={busy} onClick={createOnlineRoom}>CREATE WITH CODE</button>
             <div className="join-row">
@@ -609,24 +748,33 @@ export function App() {
       )}
 
       {match && (scene === 'match' || scene === 'results') && (
-        <section className="battle-screen">
+        <section className={`battle-screen ${mode === 'solo' ? 'battle-screen--solo' : ''}`}>
           <div className="player-zone player-zone--one">
-            <div className="player-title"><small>PLAYER</small><strong>01</strong><span>{online && onlineRole === 0 ? `YOU · ${account?.username ?? 'WASD'}` : 'WASD'}</span></div>
+            <div className="player-title"><small>PLAYER</small><strong>01</strong><span>{seatOneLabel}</span></div>
             <PlayerHud state={match} playerId={0} />
             <div className="board-shell"><BoardCanvas player={match.players[0]} events={eventsP1} eventId={batch.id} /></div>
           </div>
           <div className="versus-column">
             <div className="vs-mark">VS</div>
             <div className="frame-counter">FRAME {String(match.frame).padStart(6, '0')}</div>
+            {(mode === 'solo' || mode === 'ai') && (
+              <div className="run-score">
+                <span>SCORE</span>
+                <b>{formatScore(runScore.score)}</b>
+                {best && <i>BEST {formatScore(best.score)}</i>}
+              </div>
+            )}
             {online
               ? <div className="online-ping">ONLINE<br />{roomCode}</div>
               : <button className="pause-button" onClick={() => setPaused((value) => !value)}>{paused ? 'RESUME' : 'PAUSE'}</button>}
           </div>
-          <div className="player-zone player-zone--two">
-            <div className="player-title"><small>PLAYER</small><strong>02</strong><span>{online && onlineRole === 1 ? `YOU · ${account?.username ?? 'WASD'}` : 'ARROWS'}</span></div>
-            <div className="board-shell"><BoardCanvas player={match.players[1]} events={eventsP2} eventId={batch.id} /></div>
-            <PlayerHud state={match} playerId={1} />
-          </div>
+          {mode !== 'solo' && (
+            <div className="player-zone player-zone--two">
+              <div className="player-title"><small>PLAYER</small><strong>02</strong><span>{seatTwoLabel}</span></div>
+              <div className="board-shell"><BoardCanvas player={match.players[1]} events={eventsP2} eventId={batch.id} /></div>
+              <PlayerHud state={match} playerId={1} />
+            </div>
+          )}
 
           {countdown !== null && match.status === 'countdown' && <div className="countdown" key={countdown}>{countdown}</div>}
           {online && roomStatus === 'reconnecting' && scene === 'match' && (
@@ -651,16 +799,42 @@ export function App() {
           {scene === 'results' && (
             <div className="modal-backdrop result-backdrop">
               <div className="result-card">
-                <div className="eyebrow">{endReason === 'forfeit' ? 'OPPONENT LEFT' : 'BATTLE COMPLETE'}</div>
-                <h2>{match.winner === null ? 'DRAW GAME' : `PLAYER ${match.winner + 1} WINS`}</h2>
-                <div className="result-score">
-                  <span>P1 <b>{match.players[0].attackSent}</b> ATK</span>
-                  <i>—</i>
-                  <span>P2 <b>{match.players[1].attackSent}</b> ATK</span>
+                <div className="eyebrow">
+                  {mode === 'solo' ? 'RUN OVER'
+                    : endReason === 'forfeit' ? 'OPPONENT LEFT'
+                    : 'BATTLE COMPLETE'}
                 </div>
+                <h2>
+                  {mode === 'solo' ? (newRecord ? 'NEW RECORD' : 'TOPPED OUT')
+                    : mode === 'ai' ? (match.winner === 0 ? 'YOU WIN' : match.winner === 1 ? `${DIFFICULTY_LABEL[difficulty]} WINS` : 'DRAW GAME')
+                    : match.winner === null ? 'DRAW GAME'
+                    : `PLAYER ${match.winner + 1} WINS`}
+                </h2>
+
+                {mode === 'solo' || mode === 'ai' ? (
+                  <div className="result-run">
+                    <div><span>SCORE</span><b>{formatScore(runScore.score)}</b></div>
+                    <div><span>LINES</span><b>{runScore.lines}</b></div>
+                    <div><span>BEST COMBO</span><b>{runScore.bestCombo}</b></div>
+                    <div><span>TETRIS</span><b>{runScore.tetrises}</b></div>
+                    {runScore.tSpins > 0 && <div><span>T-SPIN</span><b>{runScore.tSpins}</b></div>}
+                    {best && mode === 'solo' && <div><span>PERSONAL BEST</span><b>{formatScore(best.score)}</b></div>}
+                  </div>
+                ) : (
+                  <div className="result-score">
+                    <span>P1 <b>{match.players[0].attackSent}</b> ATK</span>
+                    <i>—</i>
+                    <span>P2 <b>{match.players[1].attackSent}</b> ATK</span>
+                  </div>
+                )}
+
+                {mode === 'solo' && <p className="account-hint">Solo runs stay on this device — the server cannot verify a match played offline, so they do not touch the rating leaderboard.</p>}
+
                 {online
                   ? <button className="primary-button" disabled={busy} onClick={startQuickMatch}>QUICK MATCH AGAIN</button>
-                  : <button className="primary-button" disabled={busy} onClick={() => run('local', startLocalMatch)}>REMATCH</button>}
+                  : <button className="primary-button" disabled={busy} onClick={() => run(mode, () => startOfflineMatch(mode as Exclude<MatchMode, 'online'>))}>
+                      {mode === 'solo' ? 'RUN AGAIN' : 'REMATCH'}
+                    </button>}
                 <button className="text-button" onClick={returnToMenu}>BACK TO MENU</button>
               </div>
             </div>

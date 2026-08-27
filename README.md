@@ -9,10 +9,51 @@ the client and server.
 ```
 packages/
   core/      @tetrisvs/core   — deterministic simulation, replay + delta codecs
+  bot/       @tetrisvs/bot    — the AI opponent: it only ever presses keys
   store/     @tetrisvs/store  — SQLite persistence: accounts, matches, replays
   client/    Vite + React + Canvas renderer, input, audio
   server/    Node + Socket.IO authoritative server + HTTP API
 ```
+
+## Modes
+
+| | |
+|---|---|
+| **Solo** | One board, one player. Score, level, and a personal best kept on the device. |
+| **Versus AI** | Four difficulties, from one that tops itself out to one that presses a key every frame. |
+| **Local 2P** | Two people, one keyboard. |
+| **Quick Match / private room** | Online, against the authoritative server. |
+
+Solo is `MatchConfig.solo` — a flag, not a second engine. Seat 1 is simply not
+simulated, so the snapshot, the replay codec, and every renderer are untouched.
+
+### The AI
+
+`@tetrisvs/bot` reads a `MatchState` and returns a `PlayerInput`. That is the
+whole interface. It cannot place a piece, see the opponent's queue, or skip the
+lock delay — everything it does is something a player could have done with the
+same keyboard, which is why an AI match records and replays exactly like a human
+one.
+
+Placement is scored with Dellacherie's six features (landing height, eroded
+piece cells, row and column transitions, holes, well sums) using his published
+weights. Difficulty is **not** a worse evaluator; it is three separate honest
+handicaps — how often the bot may press a key, how often it deliberately takes a
+worse placement, and whether it may use hold. No knob doubles as an off switch.
+
+Measured with `npm run bench:bot` (100 s of play per level):
+
+```
+difficulty   lines  pieces  searches   median    p95     max   survived
+rookie          6      48        48     0.45 ms  1.30 ms   7.60 ms   topped out
+steady         66     174       236     0.67 ms  1.27 ms   2.65 ms   still alive
+sharp         118     298       391     0.68 ms  1.23 ms   1.81 ms   still alive
+ruthless      208     522       699     0.67 ms  1.19 ms   4.25 ms   still alive
+```
+
+It searches **once per piece, not once per tick** — that is what keeps it inside
+the client's 16.67 ms frame budget, and it is asserted as a count rather than a
+stopwatch so the test means the same thing on every machine.
 
 ## Stack
 
@@ -143,6 +184,10 @@ Things that are load-bearing and easy to undo by accident:
   Match results go through `store.recordMatch()`, which only appends to an
   in-memory queue; a separate timer writes the batch. `/health` reports the
   queue depth and the slowest flush.
+- **Offline results never touch the leaderboard.** Solo, versus-AI, and local
+  2P matches run entirely in the browser, so the server cannot verify them.
+  Submitting them to the rating table would just be a spoofable endpoint; the
+  solo personal best lives in `localStorage` instead.
 - **Passwords are scrypt, hashed asynchronously.** `scryptSync` would spend
   ~90 ms blocking the loop — six dropped game ticks per login. Sessions are
   stored as a SHA-256 digest, never as the token itself.

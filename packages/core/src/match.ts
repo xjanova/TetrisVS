@@ -542,7 +542,7 @@ export function step(state: MatchState, inputs: Inputs, config: MatchConfig = DE
 
   // Fixed player order — never iterate a Set or Object.keys here.
   stepPlayer(s, 0, inputs[0], events, config, pending);
-  stepPlayer(s, 1, inputs[1], events, config, pending);
+  if (!config.solo) stepPlayer(s, 1, inputs[1], events, config, pending);
 
   // Deliver attacks after BOTH players have been stepped, so a tick is symmetric:
   // simultaneous clears cancel each other rather than depending on player order.
@@ -571,7 +571,15 @@ export function step(state: MatchState, inputs: Inputs, config: MatchConfig = DE
   // ---- win condition
   const dead0 = !s.players[0].alive;
   const dead1 = !s.players[1].alive;
-  if (dead0 || dead1) {
+  if (config.solo) {
+    // Nobody to beat: the run ends when the one player tops out, and there is
+    // no winner to name.
+    if (dead0) {
+      s.status = 'finished';
+      s.winner = null;
+      events.push({ t: 'matchEnd', winner: null });
+    }
+  } else if (dead0 || dead1) {
     s.status = 'finished';
     s.winner = dead0 && dead1 ? null : dead0 ? 1 : 0;
     events.push({ t: 'matchEnd', winner: s.winner });

@@ -225,6 +225,15 @@ export interface MatchConfig {
   countdownTicks: number;
   /** Cells the piece drops per tick while soft drop is held. */
   softDropCellsPerTick: number;
+  /**
+   * One-player match: seat 1 is not simulated at all and only seat 0 topping
+   * out ends it.
+   *
+   * A flag rather than a separate entry point because `MatchState` keeps its
+   * shape either way — the snapshot, the replay, and every renderer stay
+   * exactly as they are, seat 1 simply never moves.
+   */
+  solo: boolean;
 }
 
 export const DEFAULT_CONFIG: MatchConfig = {
@@ -243,4 +252,5 @@ export const DEFAULT_CONFIG: MatchConfig = {
   garbageDelayTicks: 60,
   countdownTicks: 180,
   softDropCellsPerTick: 1,
+  solo: false,
 };

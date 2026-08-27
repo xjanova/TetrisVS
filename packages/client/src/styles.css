@@ -310,3 +310,34 @@ button:disabled:hover { transform: none; }
 
 .future-note.online-down i { background: #ff4f70; box-shadow: 0 0 10px #ff4f70; animation: none; }
 .future-note.online-down { color: #ff9fb0; }
+
+/* --- solo runs and the AI opponent --- */
+.difficulty-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
+.difficulty-chip {
+  padding: 8px 4px; font-size: 10px; font-weight: 800; letter-spacing: .1em;
+  border-radius: 8px; border: 1px solid rgba(120, 132, 220, .25);
+  background: rgba(10, 13, 32, .7); color: #9298b8; cursor: pointer; transition: .12s;
+}
+.difficulty-chip:hover { border-color: rgba(111, 123, 255, .6); color: #e7ebff; }
+.difficulty-chip.active {
+  background: rgba(111, 123, 255, .2); color: #e7ebff;
+  border-color: rgba(111, 123, 255, .75); box-shadow: 0 0 14px rgba(111, 123, 255, .3);
+}
+.difficulty-blurb { margin: 6px 0 2px; font-size: 11px; color: #767ca0; text-align: center; min-height: 2.6em; }
+
+.run-score { text-align: center; margin: 6px 0; }
+.run-score span { display: block; font-size: 9px; letter-spacing: .16em; color: #767ca0; }
+.run-score b { display: block; font-size: 26px; font-weight: 900; color: #8fa0ff; font-variant-numeric: tabular-nums; }
+.run-score i { display: block; font-size: 10px; letter-spacing: .1em; color: #5d6288; font-style: normal; }
+
+.result-run {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(86px, 1fr));
+  gap: 10px; margin: 4px 0 20px;
+}
+.result-run div { background: rgba(8, 10, 26, .6); border-radius: 9px; padding: 9px 6px; }
+.result-run span { display: block; font-size: 9px; letter-spacing: .12em; color: #767ca0; }
+.result-run b { display: block; font-size: 19px; font-weight: 800; font-variant-numeric: tabular-nums; }
+
+/* A solo run has one board; centre it instead of leaving a hole. */
+.battle-screen--solo { justify-content: center; }
+.battle-screen--solo .versus-column .vs-mark { display: none; }

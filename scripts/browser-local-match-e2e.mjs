@@ -1,10 +1,11 @@
 /**
- * End-to-end check of the LOCAL 2P loop in a real browser.
+ * End-to-end check of every loop that runs in the browser alone: LOCAL 2P,
+ * SOLO, and VERSUS AI.
  *
  * The matchmaking harness only ever exercises the online path, where the client
- * is a passive viewer of the server's stream. Everything the local loop owns —
- * fixed-timestep stepping, pause, the blur guard, rematch — was covered by
- * nothing. This closes that gap.
+ * is a passive viewer of the server's stream. Everything the offline loop owns —
+ * fixed-timestep stepping, pause, the blur guard, rematch, the bot, and scoring
+ * — was covered by nothing. This closes that gap.
  *
  *   npm run dev -w @tetrisvs/client
  *   node scripts/browser-local-match-e2e.mjs
@@ -59,7 +60,13 @@ class Cdp {
 
   async evaluate(expression) {
     const result = await this.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
-    if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
+    if (result.exceptionDetails) {
+      // `text` is usually just "Uncaught"; the useful part is the exception.
+      const detail = result.exceptionDetails.exception?.description
+        ?? result.exceptionDetails.exception?.value
+        ?? result.exceptionDetails.text;
+      throw new Error(`${detail} — while evaluating: ${expression.slice(0, 160)}`);
+    }
     return result.result.value;
   }
 }
@@ -200,6 +207,67 @@ try {
   const restarted = await frame(client);
   if (restarted > 30) throw new Error(`rematch resumed at frame ${restarted} instead of starting fresh`);
   report.rematch = 'verified';
+
+  // ---- SOLO: one board, a score, and no phantom opponent -----------------
+  // The rematch above left us inside a match; pause out of it first.
+  await key(client, 'Escape');
+  await waitFor(async () => (await body(client)).includes('PAUSED'), 'pause the rematch');
+  await click(client, 'QUIT TO MENU');
+  await waitFor(async () => (await body(client)).includes('SOLO'), 'menu has solo');
+  await click(client, 'SOLO');
+  await waitFor(async () => (await status(client)) !== 'none', 'solo started');
+  const soloBoards = await client.cdp.evaluate("document.querySelectorAll('canvas').length");
+  if (soloBoards !== 1) throw new Error(`solo should show one playfield, saw ${soloBoards}`);
+  await waitFor(async () => (await status(client)) === 'playing', 'solo countdown finished', 12_000);
+
+  // Seat 1 must never move in a solo run — that is the whole point of the flag.
+  const seatTwoBefore = await client.cdp.evaluate("JSON.stringify(document.querySelector('main').dataset)");
+  const soloFrom = await frame(client);
+  for (const code of ['KeyA', 'KeyW', 'Space', 'KeyD', 'Space']) await key(client, code);
+  await sleep(3000);
+  const soloTo = await frame(client);
+  if (soloTo <= soloFrom) throw new Error('solo simulation did not advance');
+  const soloScore = await client.cdp.evaluate("document.querySelector('.run-score b')?.textContent ?? '0'");
+  report.solo = { boards: soloBoards, framesRun: soloTo - soloFrom, score: soloScore };
+  if (Number(String(soloScore).replace(/,/g, '')) <= 0) throw new Error('hard drops should have scored something');
+  void seatTwoBefore;
+
+  // ---- VERSUS AI: the bot plays on its own ------------------------------
+  await key(client, 'Escape');
+  await waitFor(async () => (await body(client)).includes('PAUSED'), 'solo pause');
+  await click(client, 'QUIT TO MENU');
+  await waitFor(async () => (await body(client)).includes('PLAY THE AI'), 'menu has the AI');
+  await client.cdp.evaluate(`[...document.querySelectorAll('.difficulty-chip')].find((c) => c.textContent === 'RUTHLESS')?.click()`);
+  await click(client, 'PLAY THE AI');
+  await waitFor(async () => (await status(client)) === 'playing', 'AI match playing', 12_000);
+
+  const aiBoards = await client.cdp.evaluate("document.querySelectorAll('canvas').length");
+  if (aiBoards !== 2) throw new Error(`an AI match needs two playfields, saw ${aiBoards}`);
+  const seats = await client.cdp.evaluate("[...document.querySelectorAll('.player-title span')].map((s) => s.innerText)");
+  if (!seats.some((label) => label.includes('AI'))) throw new Error(`seat 2 is not labelled as the AI: ${JSON.stringify(seats)}`);
+
+  // Leave the human idle: anything that happens on board 2 is the bot playing.
+  const beforeHashes = await hashes(client);
+  await sleep(6000);
+  const afterHashes = await hashes(client);
+  // `String.fromCharCode(10)` rather than an escaped newline: this string is
+  // source code for another engine, and an escape that this file resolves is a
+  // literal line break by the time the page tries to parse it.
+  const aiStats = await client.cdp.evaluate(
+    "[...document.querySelectorAll('.player-hud--p2 .stat-stack div')].map((d) => d.innerText.split(String.fromCharCode(10)).join('='))",
+  );
+
+  report.ai = { seats, boardChanged: beforeHashes[1] !== afterHashes[1], stats: aiStats };
+  if (beforeHashes[1] === afterHashes[1]) throw new Error('the AI never placed a piece');
+
+  const aiLines = Number(String(aiStats.find((s) => s.startsWith('LINES')) ?? 'LINES=0').split('=')[1] ?? 0);
+  if (aiLines < 1) throw new Error(`RUTHLESS cleared ${aiLines} lines in six seconds — the bot is not playing properly`);
+  report.ai.lines = aiLines;
+
+  await key(client, 'Escape');
+  await waitFor(async () => (await body(client)).includes('PAUSED'), 'AI pause');
+  await click(client, 'QUIT TO MENU');
+  await waitFor(async () => (await body(client)).includes('QUICK MATCH'), 'back at menu again');
 
   // ---- nothing screamed in the console ----------------------------------
   report.consoleErrors = client.cdp.consoleErrors.filter((line) => !line.includes('React DevTools'));
