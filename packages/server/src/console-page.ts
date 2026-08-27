@@ -142,6 +142,9 @@ export const CONSOLE_HTML = String.raw`<!doctype html>
     <input id="p" type="password" autocomplete="current-password">
     <div class="row" style="margin-top:18px">
       <button class="primary grow" id="signin">SIGN IN</button>
+      <button class="grow hidden" id="create">CREATE ACCOUNT</button>
+    </div>
+    <div class="row" style="margin-top:8px">
       <button class="grow hidden" id="claim">CLAIM OWNER</button>
     </div>
     <div id="gate-msg"></div>
@@ -297,8 +300,12 @@ export const CONSOLE_HTML = String.raw`<!doctype html>
     api('/api/admin/setup-status').then(function (r) {
       var needs = r.body && r.body.needsSetup;
       $('claim').classList.toggle('hidden', !needs);
+      // On a brand-new server nobody has an account yet, so "sign in" alone is
+      // a dead end. Registration is already a public route; the claim below is
+      // what is actually privileged.
+      $('create').classList.toggle('hidden', !needs);
       $('gate-hint').textContent = needs
-        ? 'No operator exists yet. Sign in with the account you want to own this server, then press CLAIM OWNER.'
+        ? 'Nobody owns this server yet. Create an account (or sign in with one you already have), then press CLAIM OWNER.'
         : '';
       $('gate-sub').textContent = needs
         ? 'This server has no operator yet.'
@@ -321,6 +328,23 @@ export const CONSOLE_HTML = String.raw`<!doctype html>
         start();
       })
       .catch(function () { $('signin').disabled = false; showGate('Server unreachable.', true); });
+  }
+
+  function createAccount() {
+    var username = $('u').value.trim();
+    var password = $('p').value;
+    if (!username || !password) return showGate('Enter a name and a password of at least 8 characters.', true);
+    $('create').disabled = true;
+    api('/api/register', { method: 'POST', body: { username: username, password: password } })
+      .then(function (r) {
+        $('create').disabled = false;
+        if (r.status !== 201 || !r.body.token) return showGate(r.body.error || 'Could not create that account.', true);
+        token = r.body.token;
+        try { sessionStorage.setItem(KEY, token); } catch (e) { /* private mode */ }
+        $('p').value = '';
+        showGate('Account created. Now press CLAIM OWNER.', false);
+      })
+      .catch(function () { $('create').disabled = false; showGate('Server unreachable.', true); });
   }
 
   function claimOwner() {
@@ -624,6 +648,7 @@ export const CONSOLE_HTML = String.raw`<!doctype html>
   // ------------------------------------------------------------------ wiring
 
   $('signin').onclick = signIn;
+  $('create').onclick = createAccount;
   $('claim').onclick = claimOwner;
   $('signout').onclick = signOut;
   $('p').onkeydown = function (e) { if (e.key === 'Enter') signIn(); };
