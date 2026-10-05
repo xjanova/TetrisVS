@@ -341,3 +341,15 @@ button:disabled:hover { transform: none; }
 /* A solo run has one board; centre it instead of leaving a hole. */
 .battle-screen--solo { justify-content: center; }
 .battle-screen--solo .versus-column .vs-mark { display: none; }
+
+/* --- hub build: online features that need the game server --- */
+.soon-card {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  min-height: 45px; padding: 0 14px; border-radius: 10px;
+  border: 1px dashed rgba(120, 132, 220, .3); background: rgba(10, 13, 32, .45);
+  color: #626a91; font-size: 10px; font-weight: 850; letter-spacing: .12em;
+}
+.soon-card b {
+  flex: none; padding: 4px 9px; border-radius: 999px; font-size: 11px; letter-spacing: .02em;
+  color: #ffdf9e; background: rgba(255, 176, 32, .12); border: 1px solid rgba(255, 176, 32, .4);
+}

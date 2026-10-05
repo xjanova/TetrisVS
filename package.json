@@ -9,6 +9,7 @@
   "scripts": {
     "test": "npm run test --workspaces --if-present",
     "build": "npm run build -w @tetrisvs/core && npm run build -w @tetrisvs/bot && npm run build -w @tetrisvs/store && npm run build -w @tetrisvs/client && npm run build -w @tetrisvs/server",
+    "hub:build": "npm run build -w @tetrisvs/core && npm run build -w @tetrisvs/bot && npm run build:hub -w @tetrisvs/client",
     "typecheck": "npm run build -w @tetrisvs/core && npm run build -w @tetrisvs/bot && npm run build -w @tetrisvs/store && npm run typecheck --workspaces --if-present",
     "dev": "npm run dev -w @tetrisvs/client",
     "server": "npm run start -w @tetrisvs/server",

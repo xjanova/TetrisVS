@@ -10,6 +10,7 @@ import { applyScore, emptyScore, formatScore, loadBest, saveBest, type RunScore 
 import { ChipAudio } from './game/audio';
 import { LocalInput } from './game/input';
 import { connectOnline, SnapshotStream, type EndReason, type OnlineSocket } from './game/online';
+import { ONLINE_ENABLED } from './game/hub';
 
 type Scene = 'menu' | 'room' | 'match' | 'results';
 type MatchMode = 'local' | 'online' | 'ai' | 'solo';
@@ -438,7 +439,9 @@ export function App() {
    * there instead — the endpoint is public and carries no personal data.
    */
   useEffect(() => {
-    if (scene !== 'menu') return;
+    // The hub build has no server to ask; polling one would only fill the
+    // console with failed requests.
+    if (scene !== 'menu' || !ONLINE_ENABLED) return;
     let cancelled = false;
     const poll = () => {
       fetchStatus()
@@ -489,12 +492,14 @@ export function App() {
   }, [input, mode, scene]);
 
   /**
-   * Leaving the tab during a local match pauses it. Online is authoritative and
-   * keeps running, so there we only drop held keys (the input layer does that)
-   * rather than pretending we can stop the clock.
+   * Leaving the tab during any in-browser match (local 2P, solo, versus the AI)
+   * pauses it — otherwise an alt-tab during an AI match let the bot keep
+   * stacking while the player was away. Online is authoritative and keeps
+   * running, so there we only drop held keys (the input layer does that) rather
+   * than pretending we can stop the clock.
    */
   useEffect(() => {
-    if (scene !== 'match' || mode !== 'local') return;
+    if (scene !== 'match' || mode === 'online') return;
     const suspend = () => {
       if (document.visibilityState === 'hidden') {
         input.clear();
@@ -669,8 +674,16 @@ export function App() {
           <h1 aria-label="Tetris VS"><span>TETRIS</span><em>VS</em></h1>
           <p className="tagline">Stack fast. Send garbage. Own the grid.</p>
           <div className="mode-actions">
-            <button className="primary-button" disabled={busy} onClick={startQuickMatch}><span>QUICK MATCH</span><i>VS</i></button>
-            <button className="online-button local-button" disabled={busy} onClick={() => run('solo', () => startOfflineMatch('solo'))}>SOLO · PLAY ALONE</button>
+            {ONLINE_ENABLED ? (
+              <>
+                <button className="primary-button" disabled={busy} onClick={startQuickMatch}><span>QUICK MATCH</span><i>VS</i></button>
+                <button className="online-button local-button" disabled={busy} onClick={() => run('solo', () => startOfflineMatch('solo'))}>SOLO · PLAY ALONE</button>
+              </>
+            ) : (
+              // No server in the hub build: the first thing on screen should be
+              // something that plays.
+              <button className="primary-button" disabled={busy} onClick={() => run('solo', () => startOfflineMatch('solo'))}><span>SOLO · PLAY ALONE</span><i>1P</i></button>
+            )}
 
             <div className="private-label">VERSUS THE MACHINE</div>
             <div className="difficulty-row">
@@ -690,42 +703,60 @@ export function App() {
 
             <div className="private-label">TWO PLAYERS, ONE KEYBOARD</div>
             <button className="online-button local-button" disabled={busy} onClick={() => run('local', () => startOfflineMatch('local'))}>LOCAL 2P</button>
-            <div className="private-label">PRIVATE ROOM</div>
-            <button className="online-button" disabled={busy} onClick={createOnlineRoom}>CREATE WITH CODE</button>
-            <div className="join-row">
-              <input
-                aria-label="Room code"
-                value={joinCode}
-                maxLength={6}
-                placeholder="ROOM CODE"
-                onChange={(event) => setJoinCode(event.target.value.toUpperCase().replace(/[^A-F0-9]/g, ''))}
-                onKeyDown={(event) => { if (event.key === 'Enter') joinOnlineRoom(); }}
-              />
-              <button disabled={busy} onClick={joinOnlineRoom}>JOIN</button>
-            </div>
+            {ONLINE_ENABLED ? (
+              <>
+                <div className="private-label">PRIVATE ROOM</div>
+                <button className="online-button" disabled={busy} onClick={createOnlineRoom}>CREATE WITH CODE</button>
+                <div className="join-row">
+                  <input
+                    aria-label="Room code"
+                    value={joinCode}
+                    maxLength={6}
+                    placeholder="ROOM CODE"
+                    onChange={(event) => setJoinCode(event.target.value.toUpperCase().replace(/[^A-F0-9]/g, ''))}
+                    onKeyDown={(event) => { if (event.key === 'Enter') joinOnlineRoom(); }}
+                  />
+                  <button disabled={busy} onClick={joinOnlineRoom}>JOIN</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="private-label">ONLINE</div>
+                <div className="soon-card" aria-disabled="true">
+                  <span>QUICK MATCH · ROOMS · RANKING</span>
+                  <b>เร็ว ๆ นี้</b>
+                </div>
+              </>
+            )}
             {onlineError && <div className="online-error">{onlineError}</div>}
           </div>
-          <AccountPanel
-            token={token}
-            player={account}
-            onSignedIn={signIn}
-            onSignedOut={signOut}
-            onPlayerRefreshed={setAccount}
-          />
+          {ONLINE_ENABLED && (
+            <AccountPanel
+              token={token}
+              player={account}
+              onSignedIn={signIn}
+              onSignedOut={signOut}
+              onPlayerRefreshed={setAccount}
+            />
+          )}
           <div className="control-card">
             <div className="control-head"><span>ACTION</span><b>PLAYER 1</b><b>PLAYER 2</b></div>
             {CONTROL_ROWS.map(([action, p1, p2]) => (
               <div className="control-row" key={action}><span>{action}</span><kbd>{p1}</kbd><kbd>{p2}</kbd></div>
             ))}
           </div>
-          <div className={`future-note ${serverStatus ? 'online-ready' : 'online-down'}`}>
-            <i />
-            {serverStatus
-              ? serverStatus.maintenance
-                ? 'SERVER IN MAINTENANCE // LOCAL PLAY ONLY'
-                : `ONLINE // ${serverStatus.playersOnline} CONNECTED · ${serverStatus.activeMatches} IN PLAY`
-              : 'SERVER OFFLINE // LOCAL PLAY ONLY'}
-          </div>
+          {ONLINE_ENABLED ? (
+            <div className={`future-note ${serverStatus ? 'online-ready' : 'online-down'}`}>
+              <i />
+              {serverStatus
+                ? serverStatus.maintenance
+                  ? 'SERVER IN MAINTENANCE // LOCAL PLAY ONLY'
+                  : `ONLINE // ${serverStatus.playersOnline} CONNECTED · ${serverStatus.activeMatches} IN PLAY`
+                : 'SERVER OFFLINE // LOCAL PLAY ONLY'}
+            </div>
+          ) : (
+            <div className="future-note"><i />BROWSER EDITION // ONLINE เร็ว ๆ นี้</div>
+          )}
         </section>
       )}
 
@@ -828,7 +859,13 @@ export function App() {
                   </div>
                 )}
 
-                {mode === 'solo' && <p className="account-hint">Solo runs stay on this device — the server cannot verify a match played offline, so they do not touch the rating leaderboard.</p>}
+                {mode === 'solo' && (
+                  <p className="account-hint">
+                    {ONLINE_ENABLED
+                      ? 'Solo runs stay on this device — the server cannot verify a match played offline, so they do not touch the rating leaderboard.'
+                      : 'Solo runs and your personal best stay on this device.'}
+                  </p>
+                )}
 
                 {online
                   ? <button className="primary-button" disabled={busy} onClick={startQuickMatch}>QUICK MATCH AGAIN</button>
