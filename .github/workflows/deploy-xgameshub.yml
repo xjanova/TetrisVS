@@ -1,0 +1,114 @@
+name: Deploy to XMAN GAMES HUB
+
+# This game lives inside XMAN GAMES HUB:
+#   https://xgameshub.xman4289.com/play/tetrisvs/
+# Every push to main packages the game (tools/hub-publish.mjs), uploads it to
+# that folder, checks the live devlog.json, and publishes a release.
+# The hub reads /play/tetrisvs/devlog.json (built from DEVLOG.md) to show this
+# game's version and development notes — write DEVLOG.md for players.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: xgameshub-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  GAME_ID: tetrisvs
+  HUB_URL: https://xgameshub.xman4289.com
+
+jobs:
+  deploy:
+    name: Package, deploy, release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Version
+        id: version
+        run: echo "tag=v1.0.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build (if the game has a hub:build script)
+        run: |
+          if [ -f package.json ] && node -e "process.exit(require('./package.json').scripts?.['hub:build'] ? 0 : 1)"; then
+            npm ci
+            npm run hub:build
+          else
+            echo "no build step"
+          fi
+
+      - name: Package for the hub
+        env:
+          VERSION: ${{ steps.version.outputs.tag }}
+        run: node tools/hub-publish.mjs dist
+
+      # The key is locked on the server to
+      #   restrict,command="/usr/bin/rrsync -wo -munge /home/admin/domains/xgameshub.xman4289.com/public_html/play/tetrisvs"
+      # so this repo can only ever write its own game folder.
+      - name: Deploy (rsync)
+        id: deploy
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          if [ -z "$DEPLOY_HOST" ] || [ -z "$DEPLOY_USER" ] || [ -z "$DEPLOY_SSH_KEY" ] || [ -z "$DEPLOY_KNOWN_HOSTS" ]; then
+            echo "::notice::Deploy secrets not set — packaged and released only."
+            echo "deployed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          rsync -rltz --chmod=D755,F644 --delete-after --delay-updates \
+            -e "ssh -i $HOME/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes" \
+            dist/ "$DEPLOY_USER@$DEPLOY_HOST:"
+          rm -f ~/.ssh/deploy_key
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Check the live game
+        if: steps.deploy.outputs.deployed == 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -s -o devlog.json -w '%{http_code}' "$HUB_URL/play/$GAME_ID/devlog.json?v=$TAG" || true)
+            if [ "$code" = 200 ] && grep -qF "\"version\": \"$TAG\"" devlog.json; then echo "live: $GAME_ID $TAG"; exit 0; fi
+            sleep 5
+          done
+          if [ "$code" = 403 ] || [ "$code" = 503 ]; then
+            echo "::warning::Cloudflare answered $code to the runner, so the live game could not be checked"
+            exit 0
+          fi
+          echo "::error::$HUB_URL/play/$GAME_ID/ does not serve $TAG (HTTP $code)"
+          exit 1
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          DEPLOYED: ${{ steps.deploy.outputs.deployed }}
+        run: |
+          (cd dist && zip -qr "../$GAME_ID-$TAG.zip" .)
+          # notes = the newest DEVLOG.md section
+          awk '/^## [0-9]{4}-[0-9]{2}-[0-9]{2}/{n++} n==1' DEVLOG.md > notes.md || true
+          if [ "$DEPLOYED" = "true" ]; then echo "" >> notes.md; echo "Live: $HUB_URL/play/$GAME_ID/" >> notes.md; fi
+          gh release create "$TAG" "$GAME_ID-$TAG.zip" --target "$GITHUB_SHA" --title "$TAG" --notes-file notes.md
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

@@ -108,6 +108,22 @@ The browser harnesses need `npm run dev` up; `smoke:abuse` needs `npm run server
 (`smoke:store` starts its own throwaway server). Set `CHROME_PATH` if Chrome is
 not at the Windows default.
 
+### Static web build (XMAN GAMES HUB)
+
+```bash
+npm run hub:build     # core + bot + client in hub mode -> packages/client/dist-hub
+GAME_ID=tetrisvs VERSION=dev node tools/hub-publish.mjs dist   # package it as the hub would
+```
+
+`vite build --mode hub` is an extra build, not a replacement: `npm run build`,
+`npm run dev`, and the server are untouched. The hub build uses relative asset
+paths (it is served from `/play/tetrisvs/`), writes to its own `dist-hub/`, and
+has no server behind it, so Solo, versus AI, and local 2P are playable while
+Quick Match, private rooms, accounts, and the leaderboard show as coming soon and
+make no network requests (`src/game/hub.ts`). `hub.json` tells the packager what
+to ship; `DEVLOG.md` is the player-facing changelog the hub displays. The deploy
+workflow builds and publishes on every push to `main`.
+
 ## Persistence
 
 The server keeps its data in SQLite, in-process — no daemon, no credentials, no

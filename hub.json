@@ -1,0 +1,4 @@
+{
+  "root": "packages/client/dist-hub",
+  "ship": ["index.html", "assets"]
+}
