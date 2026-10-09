@@ -121,7 +121,8 @@ paths (it is served from `/play/tetrisvs/`), writes to its own `dist-hub/`, and
 has no server behind it, so Solo, versus AI, and local 2P are playable while
 Quick Match, private rooms, accounts, and the leaderboard show as coming soon and
 make no network requests (`src/game/hub.ts`). `hub.json` tells the packager what
-to ship; `DEVLOG.md` is the player-facing changelog the hub displays. The deploy
+to ship; `DEVLOG.md` plus the `Devlog:` lines of commit messages (see `AGENTS.md`) make up
+the player-facing changelog the hub displays. The deploy
 workflow builds and publishes on every push to `main`.
 
 ## Persistence

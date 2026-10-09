@@ -4,8 +4,9 @@ name: Deploy to XMAN GAMES HUB
 #   https://xgameshub.xman4289.com/play/tetrisvs/
 # Every push to main packages the game (tools/hub-publish.mjs), uploads it to
 # that folder, checks the live devlog.json, and publishes a release.
-# The hub reads /play/tetrisvs/devlog.json (built from DEVLOG.md) to show this
-# game's version and development notes — write DEVLOG.md for players.
+# The hub reads /play/tetrisvs/devlog.json to show this game's version and
+# development notes. It is built from DEVLOG.md plus the "Devlog: <Thai text>" lines
+# of commit messages (see AGENTS.md) — both are written for players.
 
 on:
   push:
@@ -30,6 +31,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the publisher reads Devlog lines from every commit
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -104,8 +107,8 @@ jobs:
           DEPLOYED: ${{ steps.deploy.outputs.deployed }}
         run: |
           (cd dist && zip -qr "../$GAME_ID-$TAG.zip" .)
-          # notes = the newest DEVLOG.md section
-          awk '/^## [0-9]{4}-[0-9]{2}-[0-9]{2}/{n++} n==1' DEVLOG.md > notes.md || true
+          # notes = the newest devlog entry (DEVLOG.md and commit Devlog lines)
+          node -e 'const e = require("./dist/devlog.json").entries[0]; if (e) console.log([`## ${e.date} — ${e.title}`, ...e.items.map((i) => `- ${i}`)].join("\n"))' > notes.md || true
           if [ "$DEPLOYED" = "true" ]; then echo "" >> notes.md; echo "Live: $HUB_URL/play/$GAME_ID/" >> notes.md; fi
           gh release create "$TAG" "$GAME_ID-$TAG.zip" --target "$GITHUB_SHA" --title "$TAG" --notes-file notes.md
 
