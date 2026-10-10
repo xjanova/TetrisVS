@@ -1,7 +1,7 @@
 name: Deploy to XMAN GAMES HUB
 
 # This game lives inside XMAN GAMES HUB:
-#   https://xgameshub.xman4289.com/play/tetrisvs/
+#   https://xmangameshub.online/play/tetrisvs/
 # Every push to main packages the game (tools/hub-publish.mjs), uploads it to
 # that folder, checks the live devlog.json, and publishes a release.
 # The hub reads /play/tetrisvs/devlog.json to show this game's version and
@@ -22,7 +22,7 @@ permissions:
 
 env:
   GAME_ID: tetrisvs
-  HUB_URL: https://xgameshub.xman4289.com
+  HUB_URL: https://xmangameshub.online
 
 jobs:
   deploy:
@@ -58,7 +58,7 @@ jobs:
         run: node tools/hub-publish.mjs dist
 
       # The key is locked on the server to
-      #   restrict,command="/usr/bin/rrsync -wo -munge /home/admin/domains/xgameshub.xman4289.com/public_html/play/tetrisvs"
+      #   restrict,command="/usr/bin/rrsync -wo -munge /home/admin/domains/xmangameshub.online/public_html/play/tetrisvs"
       # so this repo can only ever write its own game folder.
       - name: Deploy (rsync)
         id: deploy

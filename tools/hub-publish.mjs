@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Package this game for XMAN GAMES HUB (https://xgameshub.xman4289.com/play/<id>/).
+ * Package this game for XMAN GAMES HUB (https://xmangameshub.online/play/<id>/).
  *
  *   node tools/hub-publish.mjs <outDir>
  *   env GAME_ID   hub id (play/<GAME_ID>/), required
